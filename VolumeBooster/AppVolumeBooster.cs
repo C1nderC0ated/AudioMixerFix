@@ -1,5 +1,5 @@
 // =====================================================================================
-// AppVolumeBooster.cs - boost one application's volume past 100% (up to 200%).
+// AppVolumeBooster.cs - boost one application's volume past 100% (up to 500%).
 //
 // Part of the AudioMixerFix kit (optional add-on). Single source file, builds with the
 // in-box .NET Framework compiler - no SDK, no NuGet, no admin, no drivers:
@@ -20,7 +20,7 @@
 //      next to the exe self-heals volumes if the booster was killed hard.
 //
 // CLI (for scripting/testing; the GUI appears when run with no args):
-//   AppVolumeBooster.exe --pid <N> | --name <exe> [--boost 100..200] [--seconds <S>] [--log <file>]
+//   AppVolumeBooster.exe --pid <N> | --name <exe> [--boost 100..500] [--seconds <S>] [--log <file>]
 // =====================================================================================
 using System;
 using System.Collections.Generic;
@@ -494,7 +494,7 @@ namespace AppVolumeBoosterNs
     internal class BoostEngine
     {
         public const float DUCK = 0.04f;      // ducked mixer level of the target while boosting
-        public const float MAXBOOST = 2.0f;   // 200%
+        public const float MAXBOOST = 5.0f;   // 500%
 
         readonly uint targetPid;
         readonly string targetExe;
@@ -882,8 +882,8 @@ namespace AppVolumeBoosterNs
 
             Label volLbl = new Label();
             volLbl.Text = "Boost:"; volLbl.SetBounds(12, 55, 80, 20);
-            slider.Minimum = 100; slider.Maximum = 200;
-            slider.TickFrequency = 10; slider.SmallChange = 5; slider.LargeChange = 25;
+            slider.Minimum = 100; slider.Maximum = (int)(BoostEngine.MAXBOOST * 100);
+            slider.TickFrequency = 50; slider.SmallChange = 5; slider.LargeChange = 50;
             slider.Value = 150;
             slider.SetBounds(90, 48, 250, 45);
             slider.ValueChanged += delegate
