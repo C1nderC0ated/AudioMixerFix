@@ -1,5 +1,5 @@
 // =====================================================================================
-// AppVolumeBooster.cs - boost one application's volume past 100% (up to 500%).
+// AppVolumeBooster.cs - boost application volume past 100% (up to 500%).
 //
 // Part of the AudioMixerFix kit (optional add-on). Single source file, builds with the
 // in-box .NET Framework compiler - no SDK, no NuGet, no admin, no drivers:
@@ -9,18 +9,28 @@
 //
 // HOW IT WORKS (duck-and-boost relay, verified end-to-end on Win11 24H2 26100.9168):
 //   1. Windows' process-loopback capture API (ActivateAudioInterfaceAsync +
-//      VAD\Process_Loopback, the API OBS uses for per-app audio capture) captures ONLY
-//      the target app's audio. On this build the tap is post-session-volume.
-//   2. The target's Volume Mixer slider is therefore ducked to 4% (near-silent direct
+//      VAD\Process_Loopback, the API OBS uses for per-app audio capture) captures the
+//      chosen app(s). On this build the tap is post-session-volume.
+//   2. Each target's Volume Mixer slider is therefore ducked to 4% (near-silent direct
 //      path), and the captured signal is multiplied by boost/0.04 (float32, lossless),
-//      then re-rendered to the default output. Direct-path bleed sits 28-34 dB below
-//      the boosted copy - inaudible.
+//      then mixed (if more than one target) and re-rendered to the default output.
+//      Direct-path bleed sits 28-34 dB below the boosted copy - inaudible.
 //   3. A soft clipper above 0.95 full-scale prevents harsh digital clipping.
-//   4. On stop / target exit / booster exit the mixer slider is restored. A state file
-//      next to the exe self-heals volumes if the booster was killed hard.
+//   4. On stop / last target exit / booster exit the mixer sliders are restored. A
+//      state file next to the exe self-heals volumes if the booster was killed hard.
+//
+// MODES
+//   - One or more applications (checkboxes): INCLUDE-tree loopback per selected
+//     process tree, mixed into a single boosted output. Other apps stay untouched.
+//   - Optional Windows system sounds: ducked like an app and captured via pid-0
+//     loopback when the OS allows it. Windows does not expose a real process for
+//     that mixer entry; if activation fails, use "boost all audio" instead.
+//   - Boost all audio on this device: EXCLUDE-tree loopback of this booster process
+//     (everything else, including system sounds) and duck every other session.
 //
 // CLI (for scripting/testing; the GUI appears when run with no args):
-//   AppVolumeBooster.exe --pid <N> | --name <exe> [--boost 100..500] [--seconds <S>] [--log <file>]
+//   AppVolumeBooster.exe --pid <N> [--pid <N> ...] | --name <exe> [--name <exe> ...]
+//       | --all  [--system-sounds] [--boost 100..500] [--seconds <S>] [--log <file>]
 // =====================================================================================
 using System;
 using System.Collections.Generic;
@@ -48,6 +58,7 @@ namespace AppVolumeBoosterNs
         public const uint SRC_QUALITY = 0x08000000;
         public const uint BUF_SILENT = 2;
         public const int StateActive = 1, StateExpired = 2;
+        public const string SysSoundsName = "#SystemSounds";
     }
 
     [StructLayout(LayoutKind.Sequential, Pack = 2)]
@@ -125,8 +136,8 @@ namespace AppVolumeBoosterNs
         int GetAudioSessionControl(IntPtr sessionGuid, uint streamFlags, out IAudioSessionControl sessionControl);
         int GetSimpleAudioVolume(IntPtr sessionGuid, uint streamFlags, out ISimpleAudioVolume audioVolume);
         int GetSessionEnumerator(out IAudioSessionEnumerator enumerator);
-        int RegisterSessionNotification(IntPtr n);
-        int UnregisterSessionNotification(IntPtr n);
+        int RegisterSessionNotification(IAudioSessionNotification n);
+        int UnregisterSessionNotification(IAudioSessionNotification n);
         int RegisterDuckNotification(IntPtr s, IntPtr n);
         int UnregisterDuckNotification(IntPtr n);
     }
@@ -180,6 +191,12 @@ namespace AppVolumeBoosterNs
         int GetMute(out bool mute);
     }
 
+    [ComImport, Guid("641DD20B-4D41-49CC-ABA3-174B9477BB08"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IAudioSessionNotification
+    {
+        int OnSessionCreated(IAudioSessionControl newSession);
+    }
+
     [ComImport, Guid("72A22D78-CDE4-431D-B8CC-843A71199B6D"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     internal interface IActivateAudioInterfaceAsyncOperation
     {
@@ -212,6 +229,19 @@ namespace AppVolumeBoosterNs
         }
     }
 
+    [ComVisible(true)]
+    internal class SessionCreatedHandler : IAudioSessionNotification, IAgileObject
+    {
+        public delegate void SessionFn(IAudioSessionControl sc);
+        public SessionFn Fn;
+        public int OnSessionCreated(IAudioSessionControl newSession)
+        {
+            try { if (Fn != null) Fn(newSession); }
+            catch { }
+            return 0;
+        }
+    }
+
     internal static class Native
     {
         [DllImport("Mmdevapi.dll", ExactSpelling = true, PreserveSig = false)]
@@ -226,6 +256,28 @@ namespace AppVolumeBoosterNs
 
         [DllImport("shcore.dll")]
         public static extern int SetProcessDpiAwareness(int value);
+
+        [DllImport("dwmapi.dll")]
+        static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
+
+        [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)]
+        static extern int SetWindowTheme(IntPtr hwnd, string appName, string idList);
+
+        public static void UseDarkTitleBar(IntPtr hwnd)
+        {
+            if (hwnd == IntPtr.Zero) return;
+            int on = 1;
+            // 20 = DWMWA_USE_IMMERSIVE_DARK_MODE (Win10 20H1+); 19 = older 1809 attribute
+            if (DwmSetWindowAttribute(hwnd, 20, ref on, 4) != 0)
+                DwmSetWindowAttribute(hwnd, 19, ref on, 4);
+        }
+
+        public static void UseDarkExplorerTheme(IntPtr hwnd)
+        {
+            if (hwnd == IntPtr.Zero) return;
+            try { SetWindowTheme(hwnd, "DarkMode_Explorer", null); }
+            catch { }
+        }
 
         public static readonly Guid IID_IAudioClient = new Guid("1CB9AD4C-DBFA-4c32-B178-C2F568A703B2");
         public static readonly Guid IID_IAudioSessionManager2 = new Guid("77AA99A0-1BD6-484F-8BC7-2C654C9A9B6F");
@@ -253,7 +305,8 @@ namespace AppVolumeBoosterNs
             if (err != null) throw err;
         }
 
-        public static IAudioClient ActivateProcessLoopback(uint pid)
+        // AUDIOCLIENT_ACTIVATION_PARAMS { PROCESS_LOOPBACK, { pid, INCLUDE=0 or EXCLUDE=1 } }
+        public static IAudioClient ActivateProcessLoopback(uint pid, bool excludeTree)
         {
             IAudioClient result = null;
             Exception err = null;
@@ -261,11 +314,10 @@ namespace AppVolumeBoosterNs
             {
                 try
                 {
-                    // AUDIOCLIENT_ACTIVATION_PARAMS { PROCESS_LOOPBACK, { pid, INCLUDE_TREE } } in VT_BLOB
                     IntPtr blob = Marshal.AllocHGlobal(12);
                     Marshal.WriteInt32(blob, 0, 1);
                     Marshal.WriteInt32(blob, 4, (int)pid);
-                    Marshal.WriteInt32(blob, 8, 0);
+                    Marshal.WriteInt32(blob, 8, excludeTree ? 1 : 0);
                     IntPtr pv = Marshal.AllocHGlobal(24);
                     for (int i = 0; i < 24; i += 8) Marshal.WriteInt64(pv, i, 0);
                     Marshal.WriteInt16(pv, 0, (short)65); // VT_BLOB
@@ -333,14 +385,66 @@ namespace AppVolumeBoosterNs
 
         public static string ProcessNameOf(uint pid)
         {
+            if (pid == 0) return null;
             try { return Process.GetProcessById((int)pid).ProcessName; }
             catch { return null; }
+        }
+
+        public static bool IsBoosterName(string name)
+        {
+            return name != null && name.IndexOf("AppVolumeBooster", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        public static bool IsSystemSounds(IAudioSessionControl2 sc2)
+        {
+            try { return sc2.IsSystemSoundsSession() == 0; }
+            catch { return false; }
+        }
+
+        public static float SoftClip(float s)
+        {
+            if (s > 0.95f) return 0.95f + 0.05f * (float)Math.Tanh((s - 0.95f) / 0.05f);
+            if (s < -0.95f) return -0.95f - 0.05f * (float)Math.Tanh((-s - 0.95f) / 0.05f);
+            return s;
+        }
+    }
+
+    // =============================== sample ring (one per capture) ===================
+    internal class SampleRing
+    {
+        readonly object gate = new object();
+        float[] ring = new float[48000 * 2 * 2]; // 2 s stereo
+        int rHead, rTail, rCount;
+
+        public void Push(float[] data, int n)
+        {
+            lock (gate)
+            {
+                for (int i = 0; i < n; i++)
+                {
+                    if (rCount == ring.Length) { rTail = (rTail + 1) % ring.Length; rCount--; }
+                    ring[rHead] = data[i]; rHead = (rHead + 1) % ring.Length; rCount++;
+                }
+            }
+        }
+
+        public int Pop(float[] dst, int n)
+        {
+            lock (gate)
+            {
+                int take = Math.Min(n, rCount);
+                take -= take % 2;
+                for (int i = 0; i < take; i++) { dst[i] = ring[rTail]; rTail = (rTail + 1) % ring.Length; }
+                rCount -= take;
+                return take;
+            }
         }
     }
 
     // =============================== state file (self-heal) ==========================
-    // One line per active boost: <boosterPid>|<targetExeName>|<priorVolume>
-    // If the booster dies without restoring the ducked slider, the next run of any
+    // One line per ducked target: <boosterPid>|<targetExeName>|<priorVolume>
+    // System sounds use the synthetic name #SystemSounds.
+    // If the booster dies without restoring a ducked slider, the next run of any
     // booster instance restores it (only lines whose boosterPid is no longer alive).
     internal static class StateFile
     {
@@ -357,6 +461,16 @@ namespace AppVolumeBoosterNs
             return new Mutex(false, "AppVolumeBooster.StateFile");
         }
 
+        static string OwnPid()
+        {
+            return Process.GetCurrentProcess().Id.ToString();
+        }
+
+        static bool SameTarget(string stored, string targetExe)
+        {
+            return string.Equals(stored, targetExe, StringComparison.OrdinalIgnoreCase);
+        }
+
         public static void AddOwn(string targetExe, float prior)
         {
             Mutex m = Mtx();
@@ -364,8 +478,12 @@ namespace AppVolumeBoosterNs
             {
                 m.WaitOne(3000);
                 List<string> lines = ReadAll();
-                string own = Process.GetCurrentProcess().Id.ToString();
-                lines.RemoveAll(delegate(string l) { return l.StartsWith(own + "|"); });
+                string own = OwnPid();
+                lines.RemoveAll(delegate(string l)
+                {
+                    string[] parts = l.Split('|');
+                    return parts.Length == 3 && parts[0] == own && SameTarget(parts[1], targetExe);
+                });
                 lines.Add(own + "|" + targetExe + "|" + prior.ToString("F4", CultureInfo.InvariantCulture));
                 File.WriteAllLines(PathOf(), lines.ToArray());
             }
@@ -380,7 +498,7 @@ namespace AppVolumeBoosterNs
             {
                 m.WaitOne(3000);
                 List<string> lines = ReadAll();
-                string own = Process.GetCurrentProcess().Id.ToString();
+                string own = OwnPid();
                 lines.RemoveAll(delegate(string l) { return l.StartsWith(own + "|"); });
                 if (lines.Count == 0) { try { File.Delete(PathOf()); } catch { } }
                 else File.WriteAllLines(PathOf(), lines.ToArray());
@@ -389,20 +507,63 @@ namespace AppVolumeBoosterNs
             finally { try { m.ReleaseMutex(); } catch { } m.Close(); }
         }
 
-        // Mark our own lines as orphaned (boosterPid 0) so any later SelfHeal - in this
-        // process or a future one - keeps trying to restore the target's slider until
-        // the app is seen again. Used when the target dies while ducked, because a
-        // restore written to an expired session does not reliably reach the store.
-        public static void OrphanOwn()
+        public static void RemoveTarget(string targetExe)
         {
             Mutex m = Mtx();
             try
             {
                 m.WaitOne(3000);
                 List<string> lines = ReadAll();
-                string own = Process.GetCurrentProcess().Id.ToString();
+                string own = OwnPid();
+                lines.RemoveAll(delegate(string l)
+                {
+                    string[] parts = l.Split('|');
+                    return parts.Length == 3 && parts[0] == own && SameTarget(parts[1], targetExe);
+                });
+                if (lines.Count == 0) { try { File.Delete(PathOf()); } catch { } }
+                else File.WriteAllLines(PathOf(), lines.ToArray());
+            }
+            catch { }
+            finally { try { m.ReleaseMutex(); } catch { } m.Close(); }
+        }
+
+        // Mark matching own lines as orphaned (boosterPid 0) so any later SelfHeal
+        // keeps trying to restore the slider until the app is seen again.
+        public static void OrphanOwn()
+        {
+            RewriteOwnPrefix("0");
+        }
+
+        public static void OrphanTarget(string targetExe)
+        {
+            Mutex m = Mtx();
+            try
+            {
+                m.WaitOne(3000);
+                List<string> lines = ReadAll();
+                string own = OwnPid();
                 for (int i = 0; i < lines.Count; i++)
-                    if (lines[i].StartsWith(own + "|")) lines[i] = "0" + lines[i].Substring(own.Length);
+                {
+                    string[] parts = lines[i].Split('|');
+                    if (parts.Length == 3 && parts[0] == own && SameTarget(parts[1], targetExe))
+                        lines[i] = "0" + lines[i].Substring(own.Length);
+                }
+                File.WriteAllLines(PathOf(), lines.ToArray());
+            }
+            catch { }
+            finally { try { m.ReleaseMutex(); } catch { } m.Close(); }
+        }
+
+        static void RewriteOwnPrefix(string newPid)
+        {
+            Mutex m = Mtx();
+            try
+            {
+                m.WaitOne(3000);
+                List<string> lines = ReadAll();
+                string own = OwnPid();
+                for (int i = 0; i < lines.Count; i++)
+                    if (lines[i].StartsWith(own + "|")) lines[i] = newPid + lines[i].Substring(own.Length);
                 File.WriteAllLines(PathOf(), lines.ToArray());
             }
             catch { }
@@ -414,6 +575,15 @@ namespace AppVolumeBoosterNs
             List<string> r = new List<string>();
             try { if (File.Exists(PathOf())) r.AddRange(File.ReadAllLines(PathOf())); } catch { }
             return r;
+        }
+
+        static bool LineMatchesSession(string stored, uint spid, string sname, bool isSys)
+        {
+            if (string.Equals(stored, K.SysSoundsName, StringComparison.OrdinalIgnoreCase))
+                return isSys || spid == 0;
+            if (sname == null) return false;
+            return string.Equals(sname + ".exe", stored, StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(sname, stored, StringComparison.OrdinalIgnoreCase);
         }
 
         // Restore mixer sliders left ducked by a dead (or orphan-marked) booster line.
@@ -438,7 +608,7 @@ namespace AppVolumeBoosterNs
                     bool alive = false;
                     if (int.TryParse(parts[0], out bpid) && bpid > 0)
                     {
-                        try { Process p = Process.GetProcessById(bpid); alive = (p.ProcessName.IndexOf("AppVolumeBooster", StringComparison.OrdinalIgnoreCase) >= 0); }
+                        try { Process p = Process.GetProcessById(bpid); alive = Native.IsBoosterName(p.ProcessName); }
                         catch { alive = false; }
                     }
                     if (alive) keep.Add(l); else dead.Add(parts);
@@ -455,79 +625,117 @@ namespace AppVolumeBoosterNs
                         for (int i = 0; i < count; i++)
                         {
                             IAudioSessionControl sc; if (en.GetSession(i, out sc) != 0) continue;
-                            uint spid; ((IAudioSessionControl2)sc).GetProcessId(out spid);
+                            IAudioSessionControl2 sc2 = (IAudioSessionControl2)sc;
+                            uint spid; sc2.GetProcessId(out spid);
                             string sname = Native.ProcessNameOf(spid);
-                            if (sname == null) continue;
+                            bool isSys = Native.IsSystemSounds(sc2) || spid == 0;
                             for (int di = 0; di < dead.Count; di++)
                             {
                                 if (resolved[di]) continue;
                                 string[] parts = dead[di];
-                                if (!string.Equals(sname + ".exe", parts[1], StringComparison.OrdinalIgnoreCase) &&
-                                    !string.Equals(sname, parts[1], StringComparison.OrdinalIgnoreCase)) continue;
+                                if (!LineMatchesSession(parts[1], spid, sname, isSys)) continue;
                                 ISimpleAudioVolume v = (ISimpleAudioVolume)sc;
                                 float cur; v.GetMasterVolume(out cur);
-                                if (cur <= BoostEngine.DUCK + 0.01f) // still ducked -> repair
+                                if (cur <= BoostEngine.DUCK + 0.01f)
                                 {
                                     float prior;
                                     if (!float.TryParse(parts[2], NumberStyles.Float, CultureInfo.InvariantCulture, out prior)) prior = 1.0f;
                                     v.SetMasterVolume(prior, IntPtr.Zero);
                                     if (!healedNames.Contains(parts[1])) healedNames.Add(parts[1]);
                                 }
-                                resolved[di] = true; // healed, or seen healthy - either way done
+                                resolved[di] = true;
                             }
                         }
                     }
                     catch { }
                     for (int di = 0; di < dead.Count; di++)
-                        if (!resolved[di]) keep.Add(string.Join("|", dead[di])); // app not seen yet - retry later
+                        if (!resolved[di]) keep.Add(string.Join("|", dead[di]));
                 }
                 if (keep.Count == 0) { try { File.Delete(PathOf()); } catch { } }
                 else File.WriteAllLines(PathOf(), keep.ToArray());
             }
             catch { }
             finally { try { m.ReleaseMutex(); } catch { } m.Close(); }
-            return healedNames.Count > 0 ? string.Join(", ", healedNames.ToArray()) : null;
+            if (healedNames.Count == 0) return null;
+            for (int i = 0; i < healedNames.Count; i++)
+                if (healedNames[i] == K.SysSoundsName) healedNames[i] = "system sounds";
+            return string.Join(", ", healedNames.ToArray());
         }
     }
 
     // ================================== boost engine =================================
     internal class BoostEngine
     {
-        public const float DUCK = 0.04f;      // ducked mixer level of the target while boosting
+        public const float DUCK = 0.04f;      // ducked mixer level of a target while boosting
         public const float MAXBOOST = 5.0f;   // 500%
 
-        readonly uint targetPid;
-        readonly string targetExe;
+        readonly bool boostAll;
+        readonly bool wantSystemSounds;
+        readonly uint selfPid;
         volatile float gain;                  // boost / DUCK
         float boost;
 
-        readonly object ringLock = new object();
-        float[] ring = new float[48000 * 2 * 2]; // 2 s stereo
-        int rHead, rTail, rCount;
+        readonly object targetLock = new object();
+        readonly List<uint> targetPids = new List<uint>();
+        readonly Dictionary<uint, HashSet<uint>> treesByRoot = new Dictionary<uint, HashSet<uint>>();
+        readonly List<Process> watched = new List<Process>();
+
+        readonly List<IAudioClient> capClients = new List<IAudioClient>();
+        readonly List<AutoResetEvent> capEvs = new List<AutoResetEvent>();
+        readonly List<Thread> capThreads = new List<Thread>();
+        readonly List<SampleRing> mixRings = new List<SampleRing>();
 
         volatile bool running;
         volatile int targetPadFrames = 2400;  // standing render queue: ~50 ms; grows on underrun
-        Thread capThread, renThread;
+        Thread renThread;
         System.Threading.Timer watcher;
-        IAudioClient capClient, renClient;
-        AutoResetEvent capEv, renEv;
+        IAudioClient renClient;
+        AutoResetEvent renEv;
+        IAudioSessionManager2 liveMgr;
+        SessionCreatedHandler sessionNote;
         string devId;
-        Process targetProc;
+        volatile bool sysCapOk;
+        volatile bool anyTargetGone;
+        HashSet<uint> wantPidsSnapshot = new HashSet<uint>();
 
-        class Ducked { public ISimpleAudioVolume Vol; public float Prior; public uint Pid; }
+        class Ducked
+        {
+            public ISimpleAudioVolume Vol;
+            public float Prior;
+            public uint Pid;
+            public string Exe;
+            public string InstanceId;
+        }
         readonly List<Ducked> ducked = new List<Ducked>();
         readonly object duckLock = new object();
 
         public long CapSamples, RenFrames, Glitches;
         public volatile bool Stopped = true;
         public string StopReason = "";
+        public string StartWarning = "";
         public event EventHandler StoppedEvent;
 
-        public BoostEngine(uint pid, int boostPercent)
+        public BoostEngine(IList<uint> pids, int boostPercent, bool allAudio, bool systemSounds)
         {
-            targetPid = pid;
-            targetExe = Native.ProcessNameOf(pid);
-            if (targetExe == null) throw new ArgumentException("process " + pid + " is not running");
+            boostAll = allAudio;
+            wantSystemSounds = systemSounds && !allAudio;
+            selfPid = (uint)Process.GetCurrentProcess().Id;
+            if (!boostAll)
+            {
+                if (pids != null)
+                {
+                    foreach (uint pid in pids)
+                    {
+                        if (pid == 0 || pid == selfPid) continue;
+                        if (!targetPids.Contains(pid)) targetPids.Add(pid);
+                    }
+                }
+                if (targetPids.Count == 0 && !wantSystemSounds)
+                    throw new ArgumentException("pick at least one application, system sounds, or all audio");
+                foreach (uint pid in targetPids)
+                    if (Native.ProcessNameOf(pid) == null)
+                        throw new ArgumentException("process " + pid + " is not running");
+            }
             SetBoost(boostPercent);
         }
 
@@ -539,9 +747,28 @@ namespace AppVolumeBoosterNs
             gain = boost / DUCK;
         }
 
-        public string TargetExe { get { return targetExe; } }
-        public uint TargetPid { get { return targetPid; } }
+        public string TargetSummary
+        {
+            get
+            {
+                if (boostAll) return "all audio";
+                List<string> names = new List<string>();
+                lock (targetLock)
+                {
+                    foreach (uint pid in targetPids)
+                    {
+                        string n = Native.ProcessNameOf(pid);
+                        if (n != null && !names.Contains(n)) names.Add(n);
+                    }
+                }
+                if (wantSystemSounds) names.Add("system sounds");
+                if (names.Count == 0) return "audio";
+                return string.Join(", ", names.ToArray());
+            }
+        }
+
         public int LatencyMs { get { return targetPadFrames / 48 + 10; } }
+        public bool BoostAll { get { return boostAll; } }
 
         public void SetInitialPadMs(int ms)
         {
@@ -552,7 +779,15 @@ namespace AppVolumeBoosterNs
 
         public void Start()
         {
-            Native.RunMta(delegate() { StartCore(); });
+            Native.RunMta(delegate()
+            {
+                try { StartCore(); }
+                catch
+                {
+                    try { Stop(true); } catch { }
+                    throw;
+                }
+            });
         }
 
         void StartCore()
@@ -561,29 +796,82 @@ namespace AppVolumeBoosterNs
             running = true;
             Stopped = false;
             StopReason = "";
+            StartWarning = "";
+            anyTargetGone = false;
+            sysCapOk = false;
 
-            targetProc = Process.GetProcessById((int)targetPid);
-            targetProc.EnableRaisingEvents = true;
-            targetProc.Exited += delegate { targetGone = true; StopBecause("target closed"); };
+            if (!boostAll)
+            {
+                uint[] snap;
+                lock (targetLock) { snap = targetPids.ToArray(); }
+                foreach (uint pid in snap)
+                {
+                    try
+                    {
+                        Process p = Process.GetProcessById((int)pid);
+                        p.EnableRaisingEvents = true;
+                        uint captured = pid;
+                        p.Exited += delegate { TargetExited(captured); };
+                        watched.Add(p);
+                    }
+                    catch { TargetExited(pid); }
+                }
+            }
 
             devId = Native.DefaultRenderDeviceId();
-            // relay prefers few, short GC pauses while active
             try { System.Runtime.GCSettings.LatencyMode = System.Runtime.GCLatencyMode.SustainedLowLatency; } catch { }
-            cachedTree = DescendantsOf(targetPid);
-            DuckPass(cachedTree); // duck before the relay starts (avoids a loud overlap)
+            RebuildTrees();
 
-            // capture: process loopback on the target pid tree
-            capClient = Native.ActivateProcessLoopback(targetPid);
             WaveFormatEx fmt = WaveFormatEx.Float32Stereo48k();
-            capEv = new AutoResetEvent(false);
-            Native.Check(capClient.Initialize(K.SHARED, K.LOOPBACK | K.EVENTCB, 2000000, 0, ref fmt, IntPtr.Zero), "capture Initialize");
-            Native.Check(capClient.SetEventHandle(capEv.SafeWaitHandle.DangerousGetHandle()), "capture SetEventHandle");
-            Guid iidc = Native.IID_IAudioCaptureClient; object oc;
-            Native.Check(capClient.GetService(ref iidc, out oc), "capture GetService");
-            IAudioCaptureClient capture = (IAudioCaptureClient)oc;
+            List<IAudioClient> pendingCaps = new List<IAudioClient>();
+            if (boostAll)
+            {
+                pendingCaps.Add(Native.ActivateProcessLoopback(selfPid, true));
+            }
+            else
+            {
+                List<uint> roots = CollapseToRoots(CopyTargets());
+                List<string> capFails = new List<string>();
+                foreach (uint root in roots)
+                {
+                    try { pendingCaps.Add(Native.ActivateProcessLoopback(root, false)); }
+                    catch (Exception ex) { capFails.Add((Native.ProcessNameOf(root) ?? root.ToString()) + " (" + ex.Message + ")"); }
+                }
+                if (wantSystemSounds)
+                {
+                    try
+                    {
+                        pendingCaps.Add(Native.ActivateProcessLoopback(0, false));
+                        sysCapOk = true;
+                    }
+                    catch (Exception ex)
+                    {
+                        StartWarning = "Windows could not capture system sounds alone (" + ex.Message +
+                            "). Other selected apps will still be boosted. Use 'Boost all audio' to include system sounds.";
+                    }
+                }
+                if (pendingCaps.Count == 0)
+                {
+                    if (wantSystemSounds && !sysCapOk && CopyTargets().Length == 0)
+                        throw new InvalidOperationException("Windows cannot capture system sounds as their own stream. Use 'Boost all audio' to include them.");
+                    string extra = capFails.Count > 0 ? ": " + string.Join("; ", capFails.ToArray()) : "";
+                    throw new InvalidOperationException("no capture stream started" + extra);
+                }
+                if (capFails.Count > 0 && StartWarning == "")
+                    StartWarning = "Some apps could not be captured: " + string.Join("; ", capFails.ToArray());
+            }
 
-            // render: default device, engine converts our 48k float to the mix format
+            DuckPass(); // duck before the relay starts (avoids a loud overlap)
+            foreach (IAudioClient cap in pendingCaps)
+                FinishCapture(cap, fmt);
+
             IMMDevice dev = Native.DefaultRenderDevice();
+            liveMgr = Native.SessionManager(dev);
+            sessionNote = new SessionCreatedHandler();
+            sessionNote.Fn = DuckOne;
+            try { Native.Check(liveMgr.RegisterSessionNotification(sessionNote), "RegisterSessionNotification"); }
+            catch { sessionNote = null; }
+
             renClient = Native.ActivateClient(dev);
             renEv = new AutoResetEvent(false);
             Native.Check(renClient.Initialize(K.SHARED, K.EVENTCB | K.AUTOCONVERT | K.SRC_QUALITY, 2000000, 0, ref fmt, IntPtr.Zero), "render Initialize");
@@ -593,33 +881,50 @@ namespace AppVolumeBoosterNs
             Native.Check(renClient.GetService(ref iidr, out orr), "render GetService");
             IAudioRenderClient render = (IAudioRenderClient)orr;
 
-            // our own relay session must sit at 100%, unmuted
             Guid iidv = Native.IID_ISimpleAudioVolume; object ov;
             Native.Check(renClient.GetService(ref iidv, out ov), "render volume");
             ((ISimpleAudioVolume)ov).SetMasterVolume(1.0f, IntPtr.Zero);
             ((ISimpleAudioVolume)ov).SetMute(false, IntPtr.Zero);
 
-            capThread = new Thread(delegate() { CaptureLoop(capture); });
-            renThread = new Thread(delegate() { RenderLoop(render, renBuf); });
-            capThread.IsBackground = true; renThread.IsBackground = true;
-            capThread.Priority = ThreadPriority.Highest;
-            renThread.Priority = ThreadPriority.Highest;
-
-            Native.Check(capClient.Start(), "capture Start");
+            foreach (IAudioClient cap in capClients)
+                Native.Check(cap.Start(), "capture Start");
             Native.Check(renClient.Start(), "render Start");
-            capThread.Start(); renThread.Start();
+            foreach (Thread t in capThreads) t.Start();
+            renThread = new Thread(delegate() { RenderLoop(render, renBuf); });
+            renThread.IsBackground = true;
+            renThread.Priority = ThreadPriority.Highest;
+            renThread.Start();
 
-            watcher = new System.Threading.Timer(WatcherTick, null, 2000, 2000);
+            int period = boostAll ? 150 : 500;
+            watcher = new System.Threading.Timer(WatcherTick, null, period, period);
         }
 
-        void CaptureLoop(IAudioCaptureClient capture)
+        void FinishCapture(IAudioClient cap, WaveFormatEx fmt)
+        {
+            AutoResetEvent ev = new AutoResetEvent(false);
+            Native.Check(cap.Initialize(K.SHARED, K.LOOPBACK | K.EVENTCB, 2000000, 0, ref fmt, IntPtr.Zero), "capture Initialize");
+            Native.Check(cap.SetEventHandle(ev.SafeWaitHandle.DangerousGetHandle()), "capture SetEventHandle");
+            Guid iidc = Native.IID_IAudioCaptureClient; object oc;
+            Native.Check(cap.GetService(ref iidc, out oc), "capture GetService");
+            IAudioCaptureClient capture = (IAudioCaptureClient)oc;
+            SampleRing ring = new SampleRing();
+            capClients.Add(cap);
+            capEvs.Add(ev);
+            mixRings.Add(ring);
+            Thread t = new Thread(delegate() { CaptureLoop(capture, ev, ring); });
+            t.IsBackground = true;
+            t.Priority = ThreadPriority.Highest;
+            capThreads.Add(t);
+        }
+
+        void CaptureLoop(IAudioCaptureClient capture, AutoResetEvent ev, SampleRing ring)
         {
             uint idx = 0;
             try { Native.AvSetMmThreadCharacteristics("Pro Audio", ref idx); } catch { }
             float[] tmp = new float[48000 * 2];
             while (running)
             {
-                capEv.WaitOne(100);
+                ev.WaitOne(100);
                 uint pkt;
                 while (running && capture.GetNextPacketSize(out pkt) == 0 && pkt > 0)
                 {
@@ -633,16 +938,10 @@ namespace AppVolumeBoosterNs
                     {
                         Marshal.Copy(p, tmp, 0, samples);
                         for (int i = 0; i < samples; i++)
-                        {
-                            float s = tmp[i] * g;
-                            // soft clip above 0.95 to avoid harsh digital clipping
-                            if (s > 0.95f) s = 0.95f + 0.05f * (float)Math.Tanh((s - 0.95f) / 0.05f);
-                            else if (s < -0.95f) s = -0.95f - 0.05f * (float)Math.Tanh((-s - 0.95f) / 0.05f);
-                            tmp[i] = s;
-                        }
+                            tmp[i] = Native.SoftClip(tmp[i] * g);
                     }
                     Interlocked.Add(ref CapSamples, samples);
-                    Push(tmp, samples);
+                    ring.Push(tmp, samples);
                     capture.ReleaseBuffer(frames);
                 }
             }
@@ -652,7 +951,9 @@ namespace AppVolumeBoosterNs
         {
             uint idx = 0;
             try { Native.AvSetMmThreadCharacteristics("Pro Audio", ref idx); } catch { }
+            float[] mix = new float[renBuf * 2];
             float[] tmp = new float[renBuf * 2];
+            SampleRing[] rings = mixRings.ToArray();
             while (running)
             {
                 renEv.WaitOne(100);
@@ -661,107 +962,142 @@ namespace AppVolumeBoosterNs
                 if (pad >= target) continue;
                 uint room = renBuf - pad;
                 uint want = target - pad; if (want > room) want = room;
-                int gotSamples = Pop(tmp, (int)want * 2);
-                uint gotFrames = (uint)(gotSamples / 2);
+                int samples = (int)want * 2;
+                if (samples > mix.Length) { mix = new float[samples]; tmp = new float[samples]; }
+                Array.Clear(mix, 0, samples);
+                int maxGot = 0;
+                for (int r = 0; r < rings.Length; r++)
+                {
+                    int n = rings[r].Pop(tmp, samples);
+                    for (int i = 0; i < n; i++) mix[i] += tmp[i];
+                    if (n > maxGot) maxGot = n;
+                }
+                uint gotFrames = (uint)(maxGot / 2);
                 if (gotFrames == 0)
                 {
                     if (pad == 0)
                     {
-                        // Underrun: queue 20 ms of silence to re-prime. Before the first
-                        // real audio has rendered this is just startup priming; after
-                        // that it is an audible gap, so count it and enlarge the standing
-                        // buffer - trading a little latency for glitch-free audio on a
-                        // loaded system.
                         IntPtr ps; if (render.GetBuffer(960, out ps) == 0)
                         { for (int i = 0; i < 960 * 2 * 4; i += 8) Marshal.WriteInt64(ps, i, 0); render.ReleaseBuffer(960, 0); }
                         if (Interlocked.Read(ref RenFrames) > 0)
                         {
                             Interlocked.Increment(ref Glitches);
-                            int np = targetPadFrames + 960;   // +20 ms per glitch
-                            if (np > 7200) np = 7200;         // cap at 150 ms
+                            int np = targetPadFrames + 960;
+                            if (np > 7200) np = 7200;
                             targetPadFrames = np;
                         }
                     }
                     continue;
                 }
+                for (int i = 0; i < maxGot; i++) mix[i] = Native.SoftClip(mix[i]);
                 IntPtr p; if (render.GetBuffer(gotFrames, out p) != 0) continue;
-                Marshal.Copy(tmp, 0, p, (int)gotFrames * 2);
+                Marshal.Copy(mix, 0, p, (int)gotFrames * 2);
                 render.ReleaseBuffer(gotFrames, 0);
                 Interlocked.Add(ref RenFrames, gotFrames);
             }
         }
 
-        void Push(float[] data, int n)
+        bool WantSession(uint spid, bool isSys, string sname)
         {
-            lock (ringLock)
-            {
-                for (int i = 0; i < n; i++)
-                {
-                    if (rCount == ring.Length) { rTail = (rTail + 1) % ring.Length; rCount--; }
-                    ring[rHead] = data[i]; rHead = (rHead + 1) % ring.Length; rCount++;
-                }
-            }
+            if (spid == selfPid) return false;
+            if (Native.IsBoosterName(sname)) return false;
+            if (boostAll) return true;
+            if (isSys || spid == 0) return wantSystemSounds && sysCapOk;
+            HashSet<uint> snap = wantPidsSnapshot;
+            return snap != null && snap.Contains(spid);
         }
 
-        int Pop(float[] dst, int n)
+        void DuckOne(IAudioSessionControl sc)
         {
-            lock (ringLock)
-            {
-                int take = Math.Min(n, rCount);
-                take -= take % 2; // whole frames only
-                for (int i = 0; i < take; i++) { dst[i] = ring[rTail]; rTail = (rTail + 1) % ring.Length; }
-                rCount -= take;
-                return take;
-            }
-        }
-
-        // Duck every render session belonging to the target's process tree; remember priors.
-        // Writes the volume only when it actually differs: a no-op re-set every tick makes
-        // audiosrv re-ramp the session, which can tick audibly in the captured stream.
-        void DuckPass(HashSet<uint> tree)
-        {
+            if (sc == null || !running) return;
             lock (duckLock)
             {
                 try
                 {
-                    IMMDevice dev = Native.DefaultRenderDevice();
-                    IAudioSessionManager2 mgr = Native.SessionManager(dev);
-                    IAudioSessionEnumerator en; Native.Check(mgr.GetSessionEnumerator(out en), "sessions");
-                    int count; en.GetCount(out count);
-                    for (int i = 0; i < count; i++)
+                    IAudioSessionControl2 sc2 = (IAudioSessionControl2)sc;
+                    uint spid; sc2.GetProcessId(out spid);
+                    int st; sc2.GetState(out st);
+                    if (st == K.StateExpired) return;
+                    string sname = Native.ProcessNameOf(spid);
+                    bool isSys = Native.IsSystemSounds(sc2) || spid == 0;
+                    if (!WantSession(spid, isSys, sname)) return;
+
+                    string inst = null;
+                    try { sc2.GetSessionInstanceIdentifier(out inst); } catch { }
+                    if (inst == null) inst = "pid:" + spid.ToString() + ":" + ducked.Count.ToString();
+
+                    ISimpleAudioVolume v = (ISimpleAudioVolume)sc;
+                    float lvl; v.GetMasterVolume(out lvl);
+                    Ducked known = null;
+                    foreach (Ducked d in ducked)
+                        if (d.InstanceId == inst) { known = d; break; }
+                    if (known == null)
                     {
-                        IAudioSessionControl sc; if (en.GetSession(i, out sc) != 0) continue;
-                        uint spid; ((IAudioSessionControl2)sc).GetProcessId(out spid);
-                        if (!tree.Contains(spid)) continue;
-                        bool known = false;
-                        foreach (Ducked d in ducked) if (d.Pid == spid) { known = true; break; }
-                        ISimpleAudioVolume v = (ISimpleAudioVolume)sc;
-                        float lvl; v.GetMasterVolume(out lvl);
-                        if (!known)
-                        {
-                            float prior = lvl;
-                            if (prior <= DUCK + 0.005f) prior = 1.0f; // ducked leftover: treat as 100%
-                            Ducked d = new Ducked(); d.Vol = v; d.Prior = prior; d.Pid = spid;
-                            ducked.Add(d);
-                            StateFile.AddOwn(targetExe, d.Prior);
-                        }
-                        bool mut; v.GetMute(out mut);
-                        if (mut) v.SetMute(false, IntPtr.Zero);
-                        if (lvl > DUCK + 0.003f || lvl < DUCK - 0.003f)
-                            v.SetMasterVolume(DUCK, IntPtr.Zero); // assert only when it drifted
+                        float prior = lvl;
+                        if (prior <= DUCK + 0.005f) prior = 1.0f;
+                        known = new Ducked();
+                        known.Vol = v;
+                        known.Prior = prior;
+                        known.Pid = spid;
+                        known.Exe = isSys ? K.SysSoundsName : (sname ?? ("pid" + spid.ToString()));
+                        known.InstanceId = inst;
+                        ducked.Add(known);
+                        StateFile.AddOwn(known.Exe, known.Prior);
                     }
+                    bool mut; v.GetMute(out mut);
+                    if (mut) v.SetMute(false, IntPtr.Zero);
+                    if (lvl > DUCK + 0.003f || lvl < DUCK - 0.003f)
+                        v.SetMasterVolume(DUCK, IntPtr.Zero);
                 }
                 catch { }
             }
         }
 
-        static HashSet<uint> DescendantsOf(uint root)
+        void DuckPass()
         {
-            HashSet<uint> tree = new HashSet<uint>();
-            tree.Add(root);
             try
             {
-                Dictionary<uint, uint> parent = new Dictionary<uint, uint>();
+                IMMDevice dev = Native.DefaultRenderDevice();
+                IAudioSessionManager2 mgr = Native.SessionManager(dev);
+                IAudioSessionEnumerator en; Native.Check(mgr.GetSessionEnumerator(out en), "sessions");
+                int count; en.GetCount(out count);
+                for (int i = 0; i < count; i++)
+                {
+                    IAudioSessionControl sc; if (en.GetSession(i, out sc) != 0) continue;
+                    DuckOne(sc);
+                }
+            }
+            catch { }
+        }
+
+        uint[] CopyTargets()
+        {
+            lock (targetLock) { return targetPids.ToArray(); }
+        }
+
+        void RebuildTrees()
+        {
+            if (boostAll) { wantPidsSnapshot = new HashSet<uint>(); return; }
+            Dictionary<uint, uint> parent = ParentMap();
+            HashSet<uint> snap = new HashSet<uint>();
+            lock (targetLock)
+            {
+                treesByRoot.Clear();
+                foreach (uint pid in targetPids)
+                {
+                    HashSet<uint> tree = DescendantsOf(pid, parent);
+                    treesByRoot[pid] = tree;
+                    foreach (uint x in tree) snap.Add(x);
+                }
+            }
+            wantPidsSnapshot = snap;
+        }
+
+        static Dictionary<uint, uint> ParentMap()
+        {
+            Dictionary<uint, uint> parent = new Dictionary<uint, uint>();
+            try
+            {
                 using (ManagementObjectSearcher s = new ManagementObjectSearcher("SELECT ProcessId,ParentProcessId FROM Win32_Process"))
                 foreach (ManagementObject mo in s.Get())
                 {
@@ -769,42 +1105,113 @@ namespace AppVolumeBoosterNs
                     uint ppid = Convert.ToUInt32(mo["ParentProcessId"]);
                     parent[pid] = ppid;
                 }
-                bool grew = true;
-                while (grew)
-                {
-                    grew = false;
-                    foreach (KeyValuePair<uint, uint> kv in parent)
-                        if (tree.Contains(kv.Value) && !tree.Contains(kv.Key)) { tree.Add(kv.Key); grew = true; }
-                }
             }
             catch { }
+            return parent;
+        }
+
+        static HashSet<uint> DescendantsOf(uint root, Dictionary<uint, uint> parent)
+        {
+            HashSet<uint> tree = new HashSet<uint>();
+            tree.Add(root);
+            bool grew = true;
+            while (grew)
+            {
+                grew = false;
+                foreach (KeyValuePair<uint, uint> kv in parent)
+                    if (tree.Contains(kv.Value) && !tree.Contains(kv.Key)) { tree.Add(kv.Key); grew = true; }
+            }
             return tree;
         }
 
+        static List<uint> CollapseToRoots(uint[] pids)
+        {
+            List<uint> roots = new List<uint>();
+            Dictionary<uint, uint> parent = ParentMap();
+            foreach (uint pid in pids)
+            {
+                bool covered = false;
+                uint walk = pid;
+                int guard = 0;
+                while (parent.ContainsKey(walk) && guard++ < 64)
+                {
+                    uint pp = parent[walk];
+                    if (pp == walk) break;
+                    walk = pp;
+                    if (walk != pid)
+                    {
+                        bool selected = false;
+                        foreach (uint s in pids) if (s == walk) { selected = true; break; }
+                        if (selected) { covered = true; break; }
+                    }
+                }
+                if (!covered) roots.Add(pid);
+            }
+            return roots;
+        }
+
         int watchTick;
-        HashSet<uint> cachedTree;
 
         void WatcherTick(object state)
         {
             if (!running) return;
             try
             {
-                // target still alive?
-                if (targetProc.HasExited) { StopBecause("target closed"); return; }
-                // default device changed? -> restart cleanly on the new device
                 string cur = Native.DefaultRenderDeviceId();
-                if (cur != null && devId != null && cur != devId) { StopBecause("output device changed - press Start again"); return; }
-                // Re-assert ducks; pick up new sessions (browsers spawn them per stream).
-                // The WMI process-tree walk is expensive, so refresh it only every 5th
-                // tick (10 s); the cheap session pass runs every 2 s with the cached tree.
+                if (cur != null && devId != null && cur != devId)
+                {
+                    StopBecause("output device changed - press Start again");
+                    return;
+                }
                 watchTick++;
-                if (cachedTree == null || watchTick % 5 == 0) cachedTree = DescendantsOf(targetPid);
-                DuckPass(cachedTree);
+                if (!boostAll && watchTick % 20 == 0) RebuildTrees();
+                DuckPass();
             }
             catch { }
         }
 
-        bool targetGone;
+        void TargetExited(uint pid)
+        {
+            if (!running) return;
+            anyTargetGone = true;
+            HashSet<uint> tree = null;
+            HashSet<uint> snap = new HashSet<uint>();
+            lock (targetLock)
+            {
+                if (treesByRoot.ContainsKey(pid)) tree = treesByRoot[pid];
+                targetPids.Remove(pid);
+                treesByRoot.Remove(pid);
+                foreach (HashSet<uint> t in treesByRoot.Values)
+                    foreach (uint x in t) snap.Add(x);
+            }
+            wantPidsSnapshot = snap;
+            if (tree == null)
+            {
+                tree = new HashSet<uint>();
+                tree.Add(pid);
+            }
+            RestorePids(tree, true);
+            bool remain;
+            lock (targetLock) { remain = targetPids.Count > 0; }
+            if (!remain && !boostAll && !(wantSystemSounds && sysCapOk))
+                StopBecause("target closed");
+        }
+
+        void RestorePids(HashSet<uint> pids, bool orphan)
+        {
+            lock (duckLock)
+            {
+                for (int i = ducked.Count - 1; i >= 0; i--)
+                {
+                    Ducked d = ducked[i];
+                    if (!pids.Contains(d.Pid)) continue;
+                    try { d.Vol.SetMasterVolume(d.Prior, IntPtr.Zero); } catch { }
+                    if (orphan) StateFile.OrphanTarget(d.Exe);
+                    else StateFile.RemoveTarget(d.Exe);
+                    ducked.RemoveAt(i);
+                }
+            }
+        }
 
         void StopBecause(string reason)
         {
@@ -821,7 +1228,8 @@ namespace AppVolumeBoosterNs
             Stopped = true;
             running = false;
             try { if (watcher != null) watcher.Dispose(); } catch { }
-            try { if (capThread != null) capThread.Join(500); } catch { }
+            foreach (Thread t in capThreads)
+                try { t.Join(500); } catch { }
             try { if (renThread != null) renThread.Join(500); } catch { }
             try { System.Runtime.GCSettings.LatencyMode = System.Runtime.GCLatencyMode.Interactive; } catch { }
             Native.RunMta(delegate() { StopComCore(restoreVolumes); });
@@ -829,7 +1237,16 @@ namespace AppVolumeBoosterNs
 
         void StopComCore(bool restoreVolumes)
         {
-            try { if (capClient != null) capClient.Stop(); } catch { }
+            try
+            {
+                if (liveMgr != null && sessionNote != null)
+                    liveMgr.UnregisterSessionNotification(sessionNote);
+            }
+            catch { }
+            sessionNote = null;
+            liveMgr = null;
+            foreach (IAudioClient cap in capClients)
+                try { cap.Stop(); } catch { }
             try { if (renClient != null) renClient.Stop(); } catch { }
             if (restoreVolumes)
             {
@@ -841,28 +1258,226 @@ namespace AppVolumeBoosterNs
                     }
                     ducked.Clear();
                 }
-                // If the target died while ducked, a write to its expired session does not
-                // reliably reach the persisted store (verified on 26100.9168), so keep the
-                // state line as an orphan; SelfHeal repairs the slider when the app is next
-                // seen. On a normal stop the live-session restore above is reliable.
-                if (targetGone) StateFile.OrphanOwn();
+                if (anyTargetGone) StateFile.OrphanOwn();
                 else StateFile.RemoveOwn();
             }
+            foreach (Process p in watched)
+                try { p.Dispose(); } catch { }
+            watched.Clear();
         }
     }
 
     // ===================================== UI ========================================
+    internal static class Theme
+    {
+        public static readonly Color Bg = Color.FromArgb(28, 29, 33);
+        public static readonly Color Surface = Color.FromArgb(40, 42, 48);
+        public static readonly Color SurfaceHot = Color.FromArgb(54, 56, 64);
+        public static readonly Color Text = Color.FromArgb(236, 237, 240);
+        public static readonly Color Muted = Color.FromArgb(156, 160, 170);
+        public static readonly Color Accent = Color.FromArgb(80, 156, 236);
+        public static readonly Color AccentHot = Color.FromArgb(104, 176, 248);
+        public static readonly Color Border = Color.FromArgb(68, 70, 78);
+        public static readonly Color Stop = Color.FromArgb(176, 72, 72);
+        public static readonly Color StopHot = Color.FromArgb(196, 88, 88);
+        public static readonly Color Groove = Color.FromArgb(58, 60, 68);
+
+        public static void Button(Button b, Color fill, Color fillHot)
+        {
+            b.FlatStyle = FlatStyle.Flat;
+            b.FlatAppearance.BorderSize = 1;
+            b.FlatAppearance.BorderColor = Border;
+            b.FlatAppearance.MouseOverBackColor = fillHot;
+            b.FlatAppearance.MouseDownBackColor = fill;
+            b.UseVisualStyleBackColor = false;
+            b.BackColor = fill;
+            b.ForeColor = Text;
+            b.Cursor = Cursors.Hand;
+        }
+
+        public static void Check(CheckBox c)
+        {
+            c.FlatStyle = FlatStyle.Standard;
+            c.UseVisualStyleBackColor = false;
+            c.BackColor = Bg;
+            c.ForeColor = Text;
+        }
+    }
+
+    // Classic TrackBar ignores WinForms colors (ticks/thumb stay light). This one
+    // paints with the same palette as the rest of the window.
+    internal class DarkSlider : Control
+    {
+        int min = 100, max = 500, val = 150;
+        bool dragging;
+
+        public int Minimum
+        {
+            get { return min; }
+            set { min = value; if (val < min) Value = min; Invalidate(); }
+        }
+        public int Maximum
+        {
+            get { return max; }
+            set { max = value; if (val > max) Value = max; Invalidate(); }
+        }
+        public int Value
+        {
+            get { return val; }
+            set
+            {
+                int v = value;
+                if (v < min) v = min;
+                if (v > max) v = max;
+                if (v == val) return;
+                val = v;
+                Invalidate();
+                EventHandler h = ValueChanged;
+                if (h != null) h(this, EventArgs.Empty);
+            }
+        }
+        public event EventHandler ValueChanged;
+
+        public DarkSlider()
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
+                     ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw |
+                     ControlStyles.Selectable, true);
+            TabStop = true;
+            Cursor = Cursors.Hand;
+            BackColor = Theme.Bg;
+        }
+
+        int Pad { get { return 10; } }
+        int ThumbR { get { return 7; } }
+
+        float T
+        {
+            get
+            {
+                int span = max - min;
+                if (span <= 0) return 0;
+                return (val - min) / (float)span;
+            }
+        }
+
+        int XFromValue()
+        {
+            int inner = Width - 2 * Pad;
+            if (inner < 1) inner = 1;
+            return Pad + (int)Math.Round(T * inner);
+        }
+
+        int ValueFromX(int x)
+        {
+            int inner = Width - 2 * Pad;
+            if (inner < 1) inner = 1;
+            float t = (x - Pad) / (float)inner;
+            if (t < 0) t = 0;
+            if (t > 1) t = 1;
+            return min + (int)Math.Round(t * (max - min));
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            g.Clear(BackColor);
+            int midY = Height / 2 - 4;
+            int grooveH = 6;
+            Rectangle groove = new Rectangle(Pad, midY - grooveH / 2, Math.Max(1, Width - 2 * Pad), grooveH);
+            using (SolidBrush b = new SolidBrush(Theme.Groove))
+                g.FillRectangle(b, groove);
+            int fillW = XFromValue() - Pad;
+            if (fillW > 0)
+            {
+                using (SolidBrush b = new SolidBrush(Focused ? Theme.AccentHot : Theme.Accent))
+                    g.FillRectangle(b, new Rectangle(Pad, groove.Y, fillW, grooveH));
+            }
+            int tx = XFromValue();
+            int ty = midY;
+            using (SolidBrush b = new SolidBrush(Theme.Text))
+                g.FillEllipse(b, tx - ThumbR, ty - ThumbR, ThumbR * 2, ThumbR * 2);
+            using (Pen p = new Pen(Theme.Accent, 1.5f))
+                g.DrawEllipse(p, tx - ThumbR, ty - ThumbR, ThumbR * 2, ThumbR * 2);
+            using (SolidBrush tick = new SolidBrush(Theme.Muted))
+            {
+                int span = max - min;
+                if (span > 0)
+                {
+                    for (int v = min; v <= max; v += 50)
+                    {
+                        float t = (v - min) / (float)span;
+                        int x = Pad + (int)Math.Round(t * (Width - 2 * Pad));
+                        g.FillRectangle(tick, x, groove.Bottom + 5, 1, 4);
+                    }
+                }
+            }
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Left)
+            {
+                Focus();
+                dragging = true;
+                Capture = true;
+                Value = ValueFromX(e.X);
+            }
+            base.OnMouseDown(e);
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            if (dragging) Value = ValueFromX(e.X);
+            base.OnMouseMove(e);
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            dragging = false;
+            Capture = false;
+            base.OnMouseUp(e);
+        }
+
+        protected override void OnMouseWheel(MouseEventArgs e)
+        {
+            Focus();
+            int step = (e.Delta > 0) ? 5 : -5;
+            if ((ModifierKeys & Keys.Shift) != 0) step *= 10;
+            Value = val + step;
+            ((HandledMouseEventArgs)e).Handled = true;
+            base.OnMouseWheel(e);
+        }
+
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Left || e.KeyCode == Keys.Down) { Value = val - 5; e.Handled = true; }
+            else if (e.KeyCode == Keys.Right || e.KeyCode == Keys.Up) { Value = val + 5; e.Handled = true; }
+            else if (e.KeyCode == Keys.PageDown) { Value = val - 50; e.Handled = true; }
+            else if (e.KeyCode == Keys.PageUp) { Value = val + 50; e.Handled = true; }
+            else if (e.KeyCode == Keys.Home) { Value = min; e.Handled = true; }
+            else if (e.KeyCode == Keys.End) { Value = max; e.Handled = true; }
+            base.OnKeyDown(e);
+        }
+
+        protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
+        protected override void OnLostFocus(EventArgs e) { Invalidate(); base.OnLostFocus(e); }
+    }
+
     internal class MainForm : Form
     {
-        ComboBox combo = new ComboBox();
+        CheckedListBox list = new CheckedListBox();
         Button refreshBtn = new Button();
-        TrackBar slider = new TrackBar();
+        CheckBox chkSys = new CheckBox();
+        CheckBox chkAll = new CheckBox();
+        DarkSlider slider = new DarkSlider();
         Label boostLbl = new Label();
         Button startBtn = new Button();
         Label status = new Label();
         System.Windows.Forms.Timer uiTimer = new System.Windows.Forms.Timer();
         BoostEngine engine;
-        List<uint> comboPids = new List<uint>();
+        List<uint> listPids = new List<uint>();
         int tickN;
 
         public MainForm()
@@ -870,45 +1485,84 @@ namespace AppVolumeBoosterNs
             Text = "App Volume Booster";
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
-            ClientSize = new Size(430, 190);
+            ClientSize = new Size(470, 400);
             Font = new Font("Segoe UI", 9f);
+            BackColor = Theme.Bg;
+            ForeColor = Theme.Text;
 
             Label appLbl = new Label();
-            appLbl.Text = "Application:"; appLbl.SetBounds(12, 15, 80, 20);
-            combo.DropDownStyle = ComboBoxStyle.DropDownList;
-            combo.SetBounds(95, 12, 240, 24);
-            refreshBtn.Text = "Refresh"; refreshBtn.SetBounds(343, 11, 75, 25);
+            appLbl.Text = "Applications (check one or more):";
+            appLbl.SetBounds(12, 10, 340, 18);
+            appLbl.BackColor = Theme.Bg;
+            appLbl.ForeColor = Theme.Text;
+
+            list.CheckOnClick = true;
+            list.IntegralHeight = false;
+            list.HorizontalScrollbar = true;
+            list.BorderStyle = BorderStyle.FixedSingle;
+            list.BackColor = Theme.Surface;
+            list.ForeColor = Theme.Text;
+            list.SetBounds(12, 30, 356, 148);
+
+            refreshBtn.Text = "Refresh";
+            refreshBtn.SetBounds(376, 30, 82, 25);
+            Theme.Button(refreshBtn, Theme.Surface, Theme.SurfaceHot);
             refreshBtn.Click += delegate { FillSessions(); };
 
+            chkSys.Text = "Windows system sounds (beeps, notifications)";
+            chkSys.SetBounds(12, 184, 446, 22);
+            Theme.Check(chkSys);
+
+            chkAll.Text = "Boost all audio on this device (includes system sounds)";
+            chkAll.SetBounds(12, 206, 446, 22);
+            Theme.Check(chkAll);
+            chkAll.CheckedChanged += delegate { SyncModeEnabled(); };
+
             Label volLbl = new Label();
-            volLbl.Text = "Boost:"; volLbl.SetBounds(12, 55, 80, 20);
+            volLbl.Text = "Boost:";
+            volLbl.SetBounds(12, 242, 80, 20);
+            volLbl.BackColor = Theme.Bg;
+            volLbl.ForeColor = Theme.Text;
             slider.Minimum = 100; slider.Maximum = (int)(BoostEngine.MAXBOOST * 100);
-            slider.TickFrequency = 50; slider.SmallChange = 5; slider.LargeChange = 50;
             slider.Value = 150;
-            slider.SetBounds(90, 48, 250, 45);
+            slider.SetBounds(90, 236, 280, 45);
             slider.ValueChanged += delegate
             {
                 boostLbl.Text = slider.Value + "%";
                 if (engine != null && !engine.Stopped) engine.SetBoost(slider.Value);
             };
-            boostLbl.Text = "150%"; boostLbl.SetBounds(350, 55, 60, 20);
+            boostLbl.Text = "150%";
+            boostLbl.SetBounds(380, 242, 70, 20);
+            boostLbl.BackColor = Theme.Bg;
+            boostLbl.ForeColor = Theme.Text;
 
-            startBtn.Text = "Start boost"; startBtn.SetBounds(12, 105, 120, 30);
+            startBtn.Text = "Start boost";
+            startBtn.SetBounds(12, 288, 120, 30);
+            Theme.Button(startBtn, Theme.Accent, Theme.AccentHot);
             startBtn.Click += delegate { ToggleBoost(); };
 
-            status.SetBounds(12, 145, 406, 35);
-            status.Text = "Pick an app that is playing audio, set the boost, press Start.";
+            status.SetBounds(12, 328, 446, 60);
+            status.BackColor = Theme.Bg;
+            status.ForeColor = Theme.Muted;
+            status.Text = "Check the apps to boost, optionally include system sounds or all audio, then press Start.";
 
-            Controls.Add(appLbl); Controls.Add(combo); Controls.Add(refreshBtn);
-            Controls.Add(volLbl); Controls.Add(slider); Controls.Add(boostLbl);
-            Controls.Add(startBtn); Controls.Add(status);
+            Controls.Add(appLbl);
+            Controls.Add(list);
+            Controls.Add(refreshBtn);
+            Controls.Add(chkSys);
+            Controls.Add(chkAll);
+            Controls.Add(volLbl);
+            Controls.Add(slider);
+            Controls.Add(boostLbl);
+            Controls.Add(startBtn);
+            Controls.Add(status);
 
             uiTimer.Interval = 1000;
             uiTimer.Tick += delegate
             {
                 UpdateStatus();
                 tickN++;
-                if (tickN % 5 == 0) // periodic self-heal sweep (repairs orphaned ducks)
+                if (tickN % 5 == 0)
                 {
                     string healed = null;
                     try { healed = StateFile.SelfHeal(); } catch { }
@@ -918,6 +1572,14 @@ namespace AppVolumeBoosterNs
             };
             uiTimer.Start();
 
+            HandleCreated += delegate
+            {
+                Native.UseDarkTitleBar(Handle);
+                Native.UseDarkExplorerTheme(Handle);
+                Native.UseDarkExplorerTheme(list.Handle);
+                Native.UseDarkExplorerTheme(chkSys.Handle);
+                Native.UseDarkExplorerTheme(chkAll.Handle);
+            };
             Load += delegate
             {
                 string healed = StateFile.SelfHeal();
@@ -927,9 +1589,30 @@ namespace AppVolumeBoosterNs
             FormClosing += delegate { if (engine != null) engine.Stop(true); };
         }
 
+        void StyleActionButton(bool stopping)
+        {
+            if (stopping) Theme.Button(startBtn, Theme.Stop, Theme.StopHot);
+            else Theme.Button(startBtn, Theme.Accent, Theme.AccentHot);
+        }
+
+        void SyncModeEnabled()
+        {
+            bool idle = (engine == null || engine.Stopped);
+            bool all = chkAll.Checked;
+            list.Enabled = idle && !all;
+            refreshBtn.Enabled = idle && !all;
+            chkSys.Enabled = idle && !all;
+            chkAll.Enabled = idle;
+        }
+
         void FillSessions()
         {
-            combo.Items.Clear(); comboPids.Clear();
+            List<uint> keep = new List<uint>();
+            for (int i = 0; i < list.Items.Count; i++)
+                if (list.GetItemChecked(i) && i < listPids.Count) keep.Add(listPids[i]);
+
+            list.Items.Clear();
+            listPids.Clear();
             try
             {
                 uint self = (uint)Process.GetCurrentProcess().Id;
@@ -947,15 +1630,14 @@ namespace AppVolumeBoosterNs
                     uint pid; sc2.GetProcessId(out pid);
                     int st; sc2.GetState(out st);
                     if (pid == 0 || pid == self || st == K.StateExpired) continue;
+                    string name = Native.ProcessNameOf(pid);
+                    if (name == null || Native.IsBoosterName(name)) continue;
                     if (!names.ContainsKey(pid))
                     {
-                        string name = Native.ProcessNameOf(pid);
-                        if (name == null) continue;
                         pids.Add(pid); names[pid] = name; playing[pid] = false;
                     }
                     if (st == K.StateActive) playing[pid] = true;
                 }
-                // actively-playing apps first, then alphabetical
                 pids.Sort(delegate(uint a, uint b)
                 {
                     if (playing[a] != playing[b]) return playing[a] ? -1 : 1;
@@ -963,13 +1645,34 @@ namespace AppVolumeBoosterNs
                 });
                 foreach (uint pid in pids)
                 {
-                    comboPids.Add(pid);
-                    combo.Items.Add(names[pid] + "  (pid " + pid + (playing[pid] ? ", playing)" : ")"));
+                    listPids.Add(pid);
+                    list.Items.Add(names[pid] + "  (pid " + pid + (playing[pid] ? ", playing)" : ")"));
+                    if (keep.Contains(pid)) list.SetItemChecked(list.Items.Count - 1, true);
                 }
-                if (combo.Items.Count > 0 && combo.SelectedIndex < 0) combo.SelectedIndex = 0;
-                if (combo.Items.Count == 0) status.Text = "No apps with audio sessions found - start playback in the app first, then Refresh.";
+                if (list.Items.Count == 0 && (engine == null || engine.Stopped) && !chkAll.Checked && !chkSys.Checked)
+                    status.Text = "No apps with audio sessions found - start playback in an app first, then Refresh. You can still boost all audio or system sounds.";
             }
             catch (Exception ex) { status.Text = "Session list failed: " + ex.Message; }
+        }
+
+        List<uint> CheckedPids()
+        {
+            List<uint> pids = new List<uint>();
+            for (int i = 0; i < list.Items.Count; i++)
+                if (list.GetItemChecked(i) && i < listPids.Count) pids.Add(listPids[i]);
+            return pids;
+        }
+
+        void SetBusy(bool busy)
+        {
+            if (busy)
+            {
+                list.Enabled = false;
+                refreshBtn.Enabled = false;
+                chkSys.Enabled = false;
+                chkAll.Enabled = false;
+            }
+            else SyncModeEnabled();
         }
 
         void ToggleBoost()
@@ -979,14 +1682,22 @@ namespace AppVolumeBoosterNs
                 engine.Stop(true);
                 engine = null;
                 startBtn.Text = "Start boost";
+                StyleActionButton(false);
+                SetBusy(false);
                 status.Text = "Stopped - mixer volume restored.";
                 return;
             }
-            if (combo.SelectedIndex < 0) { status.Text = "Pick an application first."; return; }
-            uint pid = comboPids[combo.SelectedIndex];
+            List<uint> pids = CheckedPids();
+            bool all = chkAll.Checked;
+            bool sys = chkSys.Checked && !all;
+            if (!all && pids.Count == 0 && !sys)
+            {
+                status.Text = "Check at least one application, Windows system sounds, or Boost all audio.";
+                return;
+            }
             try
             {
-                engine = new BoostEngine(pid, slider.Value);
+                engine = new BoostEngine(pids, slider.Value, all, sys);
                 engine.StoppedEvent += delegate
                 {
                     try
@@ -994,8 +1705,10 @@ namespace AppVolumeBoosterNs
                         BeginInvoke((MethodInvoker)delegate
                         {
                             startBtn.Text = "Start boost";
+                            StyleActionButton(false);
                             status.Text = "Stopped: " + engine.StopReason;
                             engine = null;
+                            SetBusy(false);
                             FillSessions();
                         });
                     }
@@ -1003,11 +1716,16 @@ namespace AppVolumeBoosterNs
                 };
                 engine.Start();
                 startBtn.Text = "Stop boost";
-                status.Text = "Boosting " + engine.TargetExe + ".exe at " + slider.Value + "% (latency ~" + engine.LatencyMs + " ms).";
+                StyleActionButton(true);
+                SetBusy(true);
+                string warn = engine.StartWarning;
+                status.Text = "Boosting " + engine.TargetSummary + " at " + slider.Value + "% (latency ~" + engine.LatencyMs + " ms)."
+                    + (warn != "" ? " " + warn : "");
             }
             catch (Exception ex)
             {
                 engine = null;
+                SetBusy(false);
                 status.Text = "Start failed: " + ex.Message;
             }
         }
@@ -1015,9 +1733,11 @@ namespace AppVolumeBoosterNs
         void UpdateStatus()
         {
             if (engine == null || engine.Stopped) return;
-            status.Text = "Boosting " + engine.TargetExe + ".exe at " + slider.Value +
+            string warn = engine.StartWarning;
+            status.Text = "Boosting " + engine.TargetSummary + " at " + slider.Value +
                 "%   relayed " + (engine.RenFrames / 48000) + " s, glitches " + engine.Glitches +
-                ", latency ~" + engine.LatencyMs + " ms  (app's mixer slider held at 4% by design)";
+                ", latency ~" + engine.LatencyMs + " ms  (mixer slider(s) held at 4% by design)"
+                + (warn != "" ? "  " + warn : "");
         }
     }
 
@@ -1039,29 +1759,39 @@ namespace AppVolumeBoosterNs
 
         static int CliMain(string[] args)
         {
-            uint pid = 0; string name = null; int boostPct = 150; double seconds = 0; string log = null; int padMs = 0;
+            List<uint> pids = new List<uint>();
+            List<string> names = new List<string>();
+            int boostPct = 150; double seconds = 0; string log = null; int padMs = 0;
+            bool all = false; bool sys = false;
             for (int i = 0; i < args.Length; i++)
             {
                 string a = args[i].ToLowerInvariant();
-                if (a == "--pid" && i + 1 < args.Length) pid = uint.Parse(args[++i]);
-                else if (a == "--name" && i + 1 < args.Length) name = args[++i];
+                if (a == "--pid" && i + 1 < args.Length) pids.Add(uint.Parse(args[++i]));
+                else if (a == "--name" && i + 1 < args.Length) names.Add(args[++i]);
                 else if (a == "--boost" && i + 1 < args.Length) boostPct = int.Parse(args[++i]);
                 else if (a == "--seconds" && i + 1 < args.Length) seconds = double.Parse(args[++i], CultureInfo.InvariantCulture);
                 else if (a == "--padms" && i + 1 < args.Length) padMs = int.Parse(args[++i]);
                 else if (a == "--log" && i + 1 < args.Length) log = args[++i];
+                else if (a == "--all") all = true;
+                else if (a == "--system-sounds" || a == "--system") sys = true;
             }
             try
             {
                 StateFile.SelfHeal();
-                if (pid == 0 && name != null)
+                foreach (string name in names)
                 {
-                    Process[] ps = Process.GetProcessesByName(name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? name.Substring(0, name.Length - 4) : name);
+                    string n = name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? name.Substring(0, name.Length - 4) : name;
+                    Process[] ps = Process.GetProcessesByName(n);
                     if (ps.Length == 0) throw new ArgumentException("no process named " + name);
-                    pid = (uint)ps[0].Id;
+                    foreach (Process p in ps)
+                    {
+                        uint pid = (uint)p.Id;
+                        if (!pids.Contains(pid)) pids.Add(pid);
+                    }
                 }
-                if (pid == 0) throw new ArgumentException("--pid or --name required");
+                if (!all && pids.Count == 0 && !sys) throw new ArgumentException("--pid, --name, --system-sounds, or --all required");
 
-                BoostEngine eng = new BoostEngine(pid, boostPct);
+                BoostEngine eng = new BoostEngine(pids, boostPct, all, sys);
                 if (padMs > 0) eng.SetInitialPadMs(padMs);
                 ManualResetEvent stopped = new ManualResetEvent(false);
                 eng.StoppedEvent += delegate { stopped.Set(); };
@@ -1071,8 +1801,8 @@ namespace AppVolumeBoosterNs
                 string why = eng.StopReason;
                 eng.Stop(true);
                 string line = string.Format(CultureInfo.InvariantCulture,
-                    "ok capSamples={0} renFrames={1} glitches={2} boost={3} latencyMs={4} stopReason={5}",
-                    eng.CapSamples, eng.RenFrames, eng.Glitches, boostPct, eng.LatencyMs, why == "" ? "timer" : why);
+                    "ok capSamples={0} renFrames={1} glitches={2} boost={3} latencyMs={4} targets={5} stopReason={6}",
+                    eng.CapSamples, eng.RenFrames, eng.Glitches, boostPct, eng.LatencyMs, eng.TargetSummary, why == "" ? "timer" : why);
                 if (log != null) File.WriteAllText(log, line + "\r\n");
                 return 0;
             }
