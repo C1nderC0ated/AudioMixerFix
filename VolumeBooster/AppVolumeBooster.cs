@@ -85,131 +85,138 @@ namespace AppVolumeBoosterNs
     [ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     internal interface IMMDeviceEnumerator
     {
-        int EnumAudioEndpoints(int dataFlow, int stateMask, out IntPtr devices);
-        int GetDefaultAudioEndpoint(int dataFlow, int role, out IMMDevice endpoint);
-        int GetDevice([MarshalAs(UnmanagedType.LPWStr)] string id, out IMMDevice device);
-        int RegisterEndpointNotificationCallback(IntPtr client);
-        int UnregisterEndpointNotificationCallback(IntPtr client);
+        [PreserveSig] int EnumAudioEndpoints(int dataFlow, int stateMask, out IntPtr devices);
+        [PreserveSig] int GetDefaultAudioEndpoint(int dataFlow, int role, out IMMDevice endpoint);
+        [PreserveSig] int GetDevice([MarshalAs(UnmanagedType.LPWStr)] string id, out IMMDevice device);
+        [PreserveSig] int RegisterEndpointNotificationCallback(IntPtr client);
+        [PreserveSig] int UnregisterEndpointNotificationCallback(IntPtr client);
     }
 
     [ComImport, Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     internal interface IMMDevice
     {
-        int Activate(ref Guid iid, int clsCtx, IntPtr activationParams, [MarshalAs(UnmanagedType.IUnknown)] out object iface);
-        int OpenPropertyStore(int access, out IntPtr props);
-        int GetId([MarshalAs(UnmanagedType.LPWStr)] out string id);
-        int GetState(out int state);
+        [PreserveSig] int Activate(ref Guid iid, int clsCtx, IntPtr activationParams, [MarshalAs(UnmanagedType.IUnknown)] out object iface);
+        [PreserveSig] int OpenPropertyStore(int access, out IntPtr props);
+        [PreserveSig] int GetId([MarshalAs(UnmanagedType.LPWStr)] out string id);
+        [PreserveSig] int GetState(out int state);
     }
 
     [ComImport, Guid("1CB9AD4C-DBFA-4c32-B178-C2F568A703B2"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     internal interface IAudioClient
     {
-        int Initialize(uint shareMode, uint streamFlags, long bufferDuration, long periodicity, ref WaveFormatEx format, IntPtr sessionGuid);
-        int GetBufferSize(out uint frames);
-        int GetStreamLatency(out long latency);
-        int GetCurrentPadding(out uint padding);
-        int IsFormatSupported(uint shareMode, ref WaveFormatEx format, out IntPtr closest);
-        int GetMixFormat(out IntPtr format);
-        int GetDevicePeriod(out long defaultPeriod, out long minPeriod);
-        int Start();
-        int Stop();
-        int Reset();
-        int SetEventHandle(IntPtr handle);
-        int GetService(ref Guid iid, [MarshalAs(UnmanagedType.IUnknown)] out object service);
+        [PreserveSig] int Initialize(uint shareMode, uint streamFlags, long bufferDuration, long periodicity, ref WaveFormatEx format, IntPtr sessionGuid);
+        [PreserveSig] int GetBufferSize(out uint frames);
+        [PreserveSig] int GetStreamLatency(out long latency);
+        [PreserveSig] int GetCurrentPadding(out uint padding);
+        [PreserveSig] int IsFormatSupported(uint shareMode, ref WaveFormatEx format, out IntPtr closest);
+        [PreserveSig] int GetMixFormat(out IntPtr format);
+        [PreserveSig] int GetDevicePeriod(out long defaultPeriod, out long minPeriod);
+        [PreserveSig] int Start();
+        [PreserveSig] int Stop();
+        [PreserveSig] int Reset();
+        [PreserveSig] int SetEventHandle(IntPtr handle);
+        [PreserveSig] int GetService(ref Guid iid, [MarshalAs(UnmanagedType.IUnknown)] out object service);
     }
 
     [ComImport, Guid("C8ADBD64-E71E-48a0-A4DE-185C395CD317"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     internal interface IAudioCaptureClient
     {
-        int GetBuffer(out IntPtr data, out uint frames, out uint flags, out ulong devPos, out ulong qpcPos);
-        int ReleaseBuffer(uint frames);
-        int GetNextPacketSize(out uint frames);
+        [PreserveSig] int GetBuffer(out IntPtr data, out uint frames, out uint flags, out ulong devPos, out ulong qpcPos);
+        [PreserveSig] int ReleaseBuffer(uint frames);
+        [PreserveSig] int GetNextPacketSize(out uint frames);
     }
 
     [ComImport, Guid("F294ACFC-3146-4483-A7BF-ADDCA7C260E2"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     internal interface IAudioRenderClient
     {
-        int GetBuffer(uint frames, out IntPtr data);
-        int ReleaseBuffer(uint frames, uint flags);
+        [PreserveSig] int GetBuffer(uint frames, out IntPtr data);
+        [PreserveSig] int ReleaseBuffer(uint frames, uint flags);
     }
 
     [ComImport, Guid("77AA99A0-1BD6-484F-8BC7-2C654C9A9B6F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     internal interface IAudioSessionManager2
     {
-        int GetAudioSessionControl(IntPtr sessionGuid, uint streamFlags, out IAudioSessionControl sessionControl);
-        int GetSimpleAudioVolume(IntPtr sessionGuid, uint streamFlags, out ISimpleAudioVolume audioVolume);
-        int GetSessionEnumerator(out IAudioSessionEnumerator enumerator);
-        int RegisterSessionNotification(IAudioSessionNotification n);
-        int UnregisterSessionNotification(IAudioSessionNotification n);
-        int RegisterDuckNotification(IntPtr s, IntPtr n);
-        int UnregisterDuckNotification(IntPtr n);
+        [PreserveSig] int GetAudioSessionControl(IntPtr sessionGuid, uint streamFlags, out IAudioSessionControl sessionControl);
+        [PreserveSig] int GetSimpleAudioVolume(IntPtr sessionGuid, uint streamFlags, out ISimpleAudioVolume audioVolume);
+        [PreserveSig] int GetSessionEnumerator(out IAudioSessionEnumerator enumerator);
+        [PreserveSig] int RegisterSessionNotification(IAudioSessionNotification n);
+        [PreserveSig] int UnregisterSessionNotification(IAudioSessionNotification n);
+        [PreserveSig] int RegisterDuckNotification(IntPtr s, IntPtr n);
+        [PreserveSig] int UnregisterDuckNotification(IntPtr n);
     }
 
     [ComImport, Guid("E2F5BB11-0570-40CA-ACDD-3AA01277DEE8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     internal interface IAudioSessionEnumerator
     {
-        int GetCount(out int count);
-        int GetSession(int index, out IAudioSessionControl session);
+        [PreserveSig] int GetCount(out int count);
+        [PreserveSig] int GetSession(int index, out IAudioSessionControl session);
     }
 
     [ComImport, Guid("F4B1A599-7266-4319-A8CA-E70ACB11E8CD"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     internal interface IAudioSessionControl
     {
-        int GetState(out int state);
-        int GetDisplayName([MarshalAs(UnmanagedType.LPWStr)] out string name);
-        int SetDisplayName([MarshalAs(UnmanagedType.LPWStr)] string name, IntPtr ctx);
-        int GetIconPath([MarshalAs(UnmanagedType.LPWStr)] out string path);
-        int SetIconPath([MarshalAs(UnmanagedType.LPWStr)] string path, IntPtr ctx);
-        int GetGroupingParam(out Guid g);
-        int SetGroupingParam(ref Guid g, IntPtr ctx);
-        int RegisterAudioSessionNotification(IntPtr e);
-        int UnregisterAudioSessionNotification(IntPtr e);
+        [PreserveSig] int GetState(out int state);
+        [PreserveSig] int GetDisplayName([MarshalAs(UnmanagedType.LPWStr)] out string name);
+        [PreserveSig] int SetDisplayName([MarshalAs(UnmanagedType.LPWStr)] string name, IntPtr ctx);
+        [PreserveSig] int GetIconPath([MarshalAs(UnmanagedType.LPWStr)] out string path);
+        [PreserveSig] int SetIconPath([MarshalAs(UnmanagedType.LPWStr)] string path, IntPtr ctx);
+        [PreserveSig] int GetGroupingParam(out Guid g);
+        [PreserveSig] int SetGroupingParam(ref Guid g, IntPtr ctx);
+        [PreserveSig] int RegisterAudioSessionNotification(IntPtr e);
+        [PreserveSig] int UnregisterAudioSessionNotification(IntPtr e);
     }
 
     [ComImport, Guid("bfb7ff88-7239-4fc9-8fa2-07c950be9c6d"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     internal interface IAudioSessionControl2
     {
-        int GetState(out int state);
-        int GetDisplayName([MarshalAs(UnmanagedType.LPWStr)] out string name);
-        int SetDisplayName([MarshalAs(UnmanagedType.LPWStr)] string name, IntPtr ctx);
-        int GetIconPath([MarshalAs(UnmanagedType.LPWStr)] out string path);
-        int SetIconPath([MarshalAs(UnmanagedType.LPWStr)] string path, IntPtr ctx);
-        int GetGroupingParam(out Guid g);
-        int SetGroupingParam(ref Guid g, IntPtr ctx);
-        int RegisterAudioSessionNotification(IntPtr e);
-        int UnregisterAudioSessionNotification(IntPtr e);
-        int GetSessionIdentifier([MarshalAs(UnmanagedType.LPWStr)] out string id);
-        int GetSessionInstanceIdentifier([MarshalAs(UnmanagedType.LPWStr)] out string id);
-        int GetProcessId(out uint pid);
-        int IsSystemSoundsSession();
-        int SetDuckingPreference(bool optOut);
+        [PreserveSig] int GetState(out int state);
+        [PreserveSig] int GetDisplayName([MarshalAs(UnmanagedType.LPWStr)] out string name);
+        [PreserveSig] int SetDisplayName([MarshalAs(UnmanagedType.LPWStr)] string name, IntPtr ctx);
+        [PreserveSig] int GetIconPath([MarshalAs(UnmanagedType.LPWStr)] out string path);
+        [PreserveSig] int SetIconPath([MarshalAs(UnmanagedType.LPWStr)] string path, IntPtr ctx);
+        [PreserveSig] int GetGroupingParam(out Guid g);
+        [PreserveSig] int SetGroupingParam(ref Guid g, IntPtr ctx);
+        [PreserveSig] int RegisterAudioSessionNotification(IntPtr e);
+        [PreserveSig] int UnregisterAudioSessionNotification(IntPtr e);
+        [PreserveSig] int GetSessionIdentifier([MarshalAs(UnmanagedType.LPWStr)] out string id);
+        [PreserveSig] int GetSessionInstanceIdentifier([MarshalAs(UnmanagedType.LPWStr)] out string id);
+        [PreserveSig] int GetProcessId(out uint pid);
+        // [PreserveSig] is REQUIRED here. Without it the CLR marshals this as
+        // HRESULT IsSystemSoundsSession([out,retval] int*) - the native method takes no
+        // such pointer and never writes it, so the value read back is always 0, i.e.
+        // "yes, system sounds" for EVERY session. That made WantSession reject every
+        // app in per-app mode, so nothing was ducked while it was still captured and
+        // multiplied by boost/0.04 - constant gross distortion. Boost-all was immune
+        // because it returns true before ever reaching the system-sounds test.
+        [PreserveSig] int IsSystemSoundsSession();
+        [PreserveSig] int SetDuckingPreference(bool optOut);
     }
 
     [ComImport, Guid("87CE5498-68D6-44E5-9215-6DA47EF883D8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     internal interface ISimpleAudioVolume
     {
-        int SetMasterVolume(float level, IntPtr ctx);
-        int GetMasterVolume(out float level);
-        int SetMute(bool mute, IntPtr ctx);
-        int GetMute(out bool mute);
+        [PreserveSig] int SetMasterVolume(float level, IntPtr ctx);
+        [PreserveSig] int GetMasterVolume(out float level);
+        [PreserveSig] int SetMute(bool mute, IntPtr ctx);
+        [PreserveSig] int GetMute(out bool mute);
     }
 
     [ComImport, Guid("641DD20B-4D41-49CC-ABA3-174B9477BB08"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     internal interface IAudioSessionNotification
     {
-        int OnSessionCreated(IAudioSessionControl newSession);
+        [PreserveSig] int OnSessionCreated(IAudioSessionControl newSession);
     }
 
     [ComImport, Guid("72A22D78-CDE4-431D-B8CC-843A71199B6D"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     internal interface IActivateAudioInterfaceAsyncOperation
     {
-        int GetActivateResult(out int activateResult, [MarshalAs(UnmanagedType.IUnknown)] out object activatedInterface);
+        [PreserveSig] int GetActivateResult(out int activateResult, [MarshalAs(UnmanagedType.IUnknown)] out object activatedInterface);
     }
 
     [ComImport, Guid("41D949AB-9862-444A-80F6-C261334DA5EB"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     internal interface IActivateAudioInterfaceCompletionHandler
     {
-        int ActivateCompleted(IActivateAudioInterfaceAsyncOperation op);
+        [PreserveSig] int ActivateCompleted(IActivateAudioInterfaceAsyncOperation op);
     }
 
     [ComImport, Guid("94ea2b94-e9cc-49e0-c0ff-ee64ca8f5b90"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
@@ -288,9 +295,17 @@ namespace AppVolumeBoosterNs
         public static readonly Guid IID_IAudioRenderClient = new Guid("F294ACFC-3146-4483-A7BF-ADDCA7C260E2");
         public static readonly Guid IID_ISimpleAudioVolume = new Guid("87CE5498-68D6-44E5-9215-6DA47EF883D8");
 
+        // Now that every COM method above carries [PreserveSig], these are REAL HRESULTs,
+        // and an HRESULT is a failure only when it is negative. Several of the calls made
+        // here legitimately return a non-zero SUCCESS code - S_FALSE (1) from Stop() on an
+        // already-stopped client, AUDCLNT_S_BUFFER_EMPTY (0x08890001) from GetBuffer - so
+        // testing "hr != 0" would start throwing on perfectly good returns. Before the
+        // PreserveSig pass this function could never fire at all: the value handed back was
+        // always 0 regardless of what really happened, and genuine failures surfaced as
+        // COMExceptions thrown by the marshaller instead.
         public static void Check(int hr, string what)
         {
-            if (hr != 0) throw new COMException(what + " failed (hr=0x" + hr.ToString("X8") + ")", hr);
+            if (hr < 0) throw new COMException(what + " failed (hr=0x" + hr.ToString("X8") + ")", hr);
         }
 
         // WASAPI interfaces have no marshaling proxy: an RCW created on an MTA thread
@@ -864,6 +879,13 @@ namespace AppVolumeBoosterNs
                 List<string> capFails = new List<string>();
                 foreach (uint root in roots)
                 {
+                    if (SelfInTreeOf(root))
+                    {
+                        capFails.Add((Native.ProcessNameOf(root) ?? root.ToString()) +
+                            " (this booster is running inside that process tree, so capturing it would feed back on itself - "
+                            + "start the booster outside that app, or use 'Boost all audio')");
+                        continue;
+                    }
                     try { pendingCaps.Add(Native.ActivateProcessLoopback(root, false)); }
                     catch (Exception ex) { capFails.Add((Native.ProcessNameOf(root) ?? root.ToString()) + " (" + ex.Message + ")"); }
                 }
@@ -959,6 +981,9 @@ namespace AppVolumeBoosterNs
                 while (running && capture.GetNextPacketSize(out pkt) == 0 && pkt > 0)
                 {
                     IntPtr p; uint frames, fl; ulong dp, qp;
+                    // != 0 is deliberate and stays: the only non-zero success here is
+                    // AUDCLNT_S_BUFFER_EMPTY, and breaking out on "no data" is exactly
+                    // what we want, same as breaking out on a genuine error.
                     if (capture.GetBuffer(out p, out frames, out fl, out dp, out qp) != 0) break;
                     int samples = (int)frames * 2;
                     if (samples > tmp.Length) tmp = new float[samples];
@@ -1121,6 +1146,25 @@ namespace AppVolumeBoosterNs
                 }
             }
             wantPidsSnapshot = snap;
+        }
+
+        // True when THIS booster process sits inside the given target's process tree.
+        //
+        // Per-app capture is PROCESS_LOOPBACK with INCLUDE_PROCESS_TREE, so if the booster
+        // is a descendant of the target it captures its own rendered output, multiplies it
+        // by boost/DUCK, renders that, and captures it again: runaway feedback, at up to
+        // 500%. Double-clicking the exe is safe (its parent is explorer), but launching it
+        // from a shell or script and then boosting that shell walks straight into it.
+        // "Boost all audio" is immune - it captures with EXCLUDE_PROCESS_TREE on itself.
+        bool SelfInTreeOf(uint root)
+        {
+            HashSet<uint> tree = null;
+            lock (targetLock)
+            {
+                if (treesByRoot.ContainsKey(root)) tree = treesByRoot[root];
+            }
+            if (tree == null) tree = DescendantsOf(root, ParentMap());
+            return tree.Contains(selfPid);
         }
 
         static Dictionary<uint, uint> ParentMap()
