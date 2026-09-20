@@ -1,4 +1,7 @@
 #Requires -Version 5.1
+# FILE FORMAT: ASCII, CRLF, no BOM - keep it that way. Windows PowerShell 5.1 reads a
+# BOM-less file as ANSI, so one non-ASCII character (a typographic dash in a message,
+# or anything inside the C# blocks below) is silently mangled before it ever runs.
 <#
 Fix-AudioMixer.ps1 (v2)
 This script restores and safeguards the memory for Windows 11's per-application volume settings (known as "Volume Mixer"). It also helps identify common issues that prevent these settings from working correctly.
@@ -60,6 +63,8 @@ function Section([string]$t) { Write-Host ''; Write-Host "== $t ==" -ForegroundC
 
 # ---- constants -------------------------------------------------------------
 # Both are known store variants. 'Sub' is the HKCU-relative path for the label API.
+# NOTE: Check-Store.bat mirrors this list in its own $paths/$names arrays, and README.md
+# documents it in a table. Three copies - change one, change all three.
 $Stores = @(
     @{ Name = 'canonical (IE LowRegistry)';
        Reg  = 'HKCU\Software\Microsoft\Internet Explorer\LowRegistry\Audio\PolicyConfig\PropertyStore';
@@ -84,8 +89,28 @@ $Elevated     = ([Security.Principal.WindowsPrincipal][Security.Principal.Window
 function Ensure-BackupDir { if (-not (Test-Path $BackupDir)) { New-Item -ItemType Directory -Force -Path $BackupDir | Out-Null } }
 function Stamp { (Get-Date).ToString('yyyyMMdd-HHmmss') }
 
+function Backup-Shortcut([System.IO.FileInfo]$lnk) {
+    # Desktop, Start Menu and the taskbar pin folder routinely hold shortcuts sharing one
+    # leaf name (three Thorium.lnk on this machine), so a name-only backup lets them
+    # overwrite each other inside a single second - and even when the stamps differ you
+    # cannot tell which copy came from where. Tag each file with a short hash of its
+    # source path and append the mapping, so restoring is not guesswork.
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $h = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::Unicode.GetBytes($lnk.FullName.ToLower()))).Replace('-','').Substring(0,8) }
+    finally { $sha.Dispose() }
+    $dst = Join-Path $BackupDir ($lnk.Name + '.' + $h + '.' + (Stamp) + '.bak')
+    Copy-Item -LiteralPath $lnk.FullName -Destination $dst -Force
+    Add-Content -LiteralPath (Join-Path $BackupDir 'shortcut-sources.txt') -Value ((Split-Path $dst -Leaf) + "`t" + $lnk.FullName)
+    $dst
+}
+
 # ---- registry integrity-label helper (the part a .reg file cannot do) -------
-if (-not ('RegLabel' -as [type])) {
+# Compiled ON DEMAND. Add-Type shells out to the C# compiler - measured at ~0.8 s for
+# this type and ~0.6 s for RegDel below. Sitting at the top of the script that cost was
+# paid by every invocation, -Status and -CheckOnly included; now each path pays only for
+# the type it actually uses.
+function Initialize-RegLabel {
+    if ('RegLabel' -as [type]) { return }
 Add-Type -Language CSharp -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -128,7 +153,9 @@ public static class RegLabel {
 }
 
 # ---- registry ownership+delete helper (MMDevices keys are TrustedInstaller-owned) --
-if (-not ('RegDel' -as [type])) {
+# Compiled ON DEMAND (~0.6 s): only -CleanGhostEndpoints ever needs this one.
+function Initialize-RegDel {
+    if ('RegDel' -as [type]) { return }
 Add-Type -Language CSharp -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -178,6 +205,7 @@ public static class RegDel {
 function Get-ExistingStores { @($Stores | Where-Object { Test-Path $_.PS }) }
 
 function Get-LabelText([string]$sub) {
+    Initialize-RegLabel
     $l = [RegLabel]::Get($sub)
     if ([string]::IsNullOrWhiteSpace($l) -or $l -eq 'S:') { '(none = Medium)' } else { $l }
 }
@@ -232,7 +260,8 @@ function Show-Status([bool]$Deep) {
         $lbl = Get-LabelText $s.Sub
         $tag = if ($k.SubKeyCount -gt 0) { 'ACTIVE store' } else { 'empty' }
         Report INFO ("{0}: {1} entries [{2}]  label = {3}" -f $s.Name, $k.SubKeyCount, $tag, $lbl)
-        foreach ($sk in ($k.GetSubKeyNames() | Select-Object -First 15)) {
+        $allNames = @($k.GetSubKeyNames())
+        foreach ($sk in ($allNames | Select-Object -First 15)) {
             $def = (Get-ItemProperty (Join-Path $s.PS $sk) -ErrorAction SilentlyContinue).'(default)'
             $app = '(system sounds)'
             if ($def -and $def -notmatch '\|#') {
@@ -242,6 +271,8 @@ function Show-Status([bool]$Deep) {
             }
             Write-Host ("      - {0}" -f $app)
         }
+        # the list is capped at 15 - say so instead of showing a partial list as complete
+        if ($allNames.Count -gt 15) { Write-Host ("      ... and {0} more" -f ($allNames.Count - 15)) }
     }
     Report INFO 'Reminder: volumes are saved PER OUTPUT DEVICE and when the app CLOSES.'
 
@@ -330,6 +361,7 @@ function Fix-BleachBit {
 # ---- FIX 2: store key(s) + low integrity label -----------------------------
 function Fix-Store {
     Section 'Per-app volume store: key + low integrity label (both variants probed)'
+    Initialize-RegLabel
     $found = Get-ExistingStores
     if ($CheckOnly) {
         if ($found.Count -eq 0) { Report INFO 'no store key exists - WOULD create the canonical one and label it Low' }
@@ -340,7 +372,14 @@ function Fix-Store {
     if ($found.Count -eq 0) {
         Report INFO 'No store key found - creating the canonical path and applying the Low label.'
         & reg.exe add $Stores[0].Reg /f | Out-Null
+        $rc = $LASTEXITCODE
         $found = Get-ExistingStores
+        # Unchecked, a failed create leaves $found empty, the loop below never runs, and
+        # the function returns having printed nothing after the line above - a silent no-op.
+        if ($found.Count -eq 0) {
+            Report FAIL ("Could not create the store key (reg.exe exit {0}). Check HKCU write access, or try -RebuildStore." -f $rc)
+            return
+        }
     }
     foreach ($s in $found) {
         $k = Get-Item $s.PS
@@ -359,6 +398,7 @@ function Fix-Store {
 # ---- OPT-IN: rebuild the store natively ------------------------------------
 function Rebuild-Store {
     Section 'REBUILD store: delete + let the Windows Audio service recreate it'
+    Initialize-RegLabel
     Report INFO 'This is the "let Windows do it" repair. WARNING: all RUNNING apps reset to 100% when the audio service restarts.'
     if (-not $Elevated) { Report FAIL 'Requires admin (service restart). Re-run elevated.'; return }
     $found = Get-ExistingStores
@@ -370,8 +410,16 @@ function Rebuild-Store {
         Stop-Service -Name AudioEndpointBuilder -Force -ErrorAction Stop
     } catch { Report FAIL ("Could not stop audio services: {0}" -f $_.Exception.Message); return }
     foreach ($s in $found) { & reg.exe delete $s.Reg /f | Out-Null }
-    Start-Service -Name AudioEndpointBuilder
-    Start-Service -Name Audiosrv
+    # Guarded on purpose: $ErrorActionPreference is 'Stop', so an unguarded failure
+    # here aborts the whole script - skipping the recovery below, the Summary and the
+    # exit code - and leaves the machine with the audio stack down and no explanation.
+    foreach ($svc in 'AudioEndpointBuilder','Audiosrv') {
+        try { Start-Service -Name $svc -ErrorAction Stop }
+        catch {
+            Report FAIL ("Could not restart {0}: {1}" -f $svc, $_.Exception.Message)
+            Report INFO 'Start it from services.msc (or reboot) before relying on audio again.'
+        }
+    }
     Start-Sleep -Seconds 2
     # Empirical note (verified on my machine, build 26100): the audio service does
     # NOT reliably re-create the store chain by itself - it only writes into an
@@ -394,6 +442,7 @@ function Clean-GhostEndpoints {
     Section 'Remove ghost (NOTPRESENT) audio endpoints'
     Report INFO 'Ghosts are leftover registry entries for devices no longer present. Removing them is cosmetic (tidies the mixer/device list).'
     if (-not $Elevated) { Report FAIL 'Requires admin - these keys are TrustedInstaller-owned. Re-run elevated (Fix-AudioMixer.cmd).'; return }
+    Initialize-RegDel
     $roots = @(
         @{ Flow = 'Render';  Path = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render';  RegBase = 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render' },
         @{ Flow = 'Capture'; Path = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Capture'; RegBase = 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Capture' }
@@ -421,6 +470,12 @@ function Clean-GhostEndpoints {
     Ensure-BackupDir
     $bk = Join-Path $BackupDir ('MMDevices-Audio.' + (Stamp) + '.reg')
     & reg.exe export 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio' $bk /y | Out-Null
+    # reg.exe signals failure only through its exit code and writes no file when it
+    # fails. Unchecked, the [OK] below is a lie and the delete loop runs without a net.
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $bk) -or (Get-Item $bk).Length -eq 0) {
+        Report FAIL ("Backup of MMDevices\Audio FAILED (reg.exe exit {0}) - refusing to delete anything without it." -f $LASTEXITCODE)
+        return
+    }
     Report OK ("Backed up MMDevices\Audio -> {0}" -f (Split-Path $bk -Leaf))
     $audiosrvWasRunning = (Get-Service Audiosrv -ErrorAction SilentlyContinue).Status -eq 'Running'
     try { Stop-Service Audiosrv -Force -ErrorAction Stop; Stop-Service AudioEndpointBuilder -Force -ErrorAction Stop }
@@ -436,7 +491,9 @@ function Clean-GhostEndpoints {
     }
     Start-Service AudioEndpointBuilder -ErrorAction SilentlyContinue
     if ($audiosrvWasRunning) { Start-Service Audiosrv -ErrorAction SilentlyContinue }
-    Report OK ("Removed {0} of {1} ghost endpoint(s); audio services restarted." -f $done, $targets.Count)
+    if     ($done -eq $targets.Count) { Report OK   ("Removed {0} of {1} ghost endpoint(s); audio services restarted." -f $done, $targets.Count) }
+    elseif ($done -eq 0)              { Report FAIL ("Removed NONE of {0} ghost endpoint(s) - see the lines above. Audio services restarted." -f $targets.Count) }
+    else                              { Report WARN ("Removed {0} of {1} ghost endpoint(s); the rest failed - see above. Audio services restarted." -f $done, $targets.Count) }
     Report INFO 'To restore, import the MMDevices-Audio backup .reg from the backups folder.'
 }
 
@@ -478,7 +535,7 @@ function Fix-Browsers {
                 if (-not $has) { continue }
                 if ($CheckOnly) { Report INFO ("WOULD remove flags from: {0}" -f $lnk.Name); continue }
                 Ensure-BackupDir
-                Copy-Item $lnk.FullName (Join-Path $BackupDir ($lnk.Name + '.' + (Stamp) + '.bak')) -Force
+                Backup-Shortcut $lnk | Out-Null
                 $sc.Arguments = (($sc.Arguments -replace [regex]::Escape($BrowserFlags), '') -replace '\s+', ' ').Trim()
                 $sc.Save(); $touched++
                 Report OK ("Removed flags: {0}" -f $lnk.Name)
@@ -487,7 +544,7 @@ function Fix-Browsers {
             if ($has) { Report OK ("{0} - flags already present." -f $lnk.Name); continue }
             if ($CheckOnly) { Report INFO ("WOULD add flags to: {0} ({1})" -f $lnk.Name, $exe); continue }
             Ensure-BackupDir
-            Copy-Item $lnk.FullName (Join-Path $BackupDir ($lnk.Name + '.' + (Stamp) + '.bak')) -Force
+            Backup-Shortcut $lnk | Out-Null
             $sc.Arguments = ("$($sc.Arguments) $BrowserFlags").Trim()
             $sc.Save(); $touched++
             Report OK ("Added flags: {0} ({1})" -f $lnk.Name, $exe)
@@ -535,6 +592,24 @@ function Disable-Enhancements {
 
 # ---- main ------------------------------------------------------------------
 Write-Host 'Fix-AudioMixer v2 - Windows 11 per-app volume persistence' -ForegroundColor White
+
+# The dispatch below is one if/elseif chain, so passing two action switches would run
+# only the first and never tell the user the second was ignored. Names (not the hashes)
+# are collected into a real array - a lone hashtable's .Count is its KEY count, not 1.
+$exclusive = @(@(
+    @{ N = 'Status';                  V = $Status },
+    @{ N = 'Revert';                  V = $Revert },
+    @{ N = 'RebuildStore';            V = $RebuildStore },
+    @{ N = 'CleanGhostEndpoints';     V = $CleanGhostEndpoints },
+    @{ N = 'DisableEnhancements';     V = $DisableEnhancements },
+    @{ N = 'DisableBtAbsoluteVolume'; V = $DisableBtAbsoluteVolume },
+    @{ N = 'EnableBtAbsoluteVolume';  V = $EnableBtAbsoluteVolume }
+) | Where-Object { $_.V } | ForEach-Object { $_.N })
+if ($exclusive.Count -gt 1) {
+    Report FAIL ("Mutually exclusive switches: -{0}. Pick one - only -CheckOnly combines with an action." -f ($exclusive -join ', -'))
+    exit 2
+}
+
 $modeName = if ($Status) { 'Status/diagnosis' }
     elseif ($Revert) { 'Revert browser flags' }
     elseif ($RebuildStore) { 'Rebuild store' }
