@@ -41,7 +41,7 @@ holds each target's mixer slider at **4%** (a whisper, ~30 dB below the boosted
 copy) and multiplies the captured signal by `boost / 0.04`. That is why, while
 a boost is active:
 
-- each boosted app's slider in the Volume Mixer sits at 4% - **by design, do not "fix" it**;
+- each boosted app's slider in the Volume Mixer sits at 4% - **by design, do not "fix" it**. That 4% is also the quickest health check there is: if a boosted app's slider does *not* drop to 4% while the boost is running, the boost is broken, and what you are hearing is the app at full volume plus a copy overdriven by 25x. Stop the boost rather than reaching for the volume knob;
 - with **Boost all audio**, every other slider (including System sounds) sits at 4% the same way;
 - a new entry `AppVolumeBooster` appears in the mixer - that is the boosted copy (leave it at 100%);
 - audio arrives with ~60 ms extra latency (fine for music/video/games; noticeable in rhythm games). If the machine is too busy to keep such a small buffer fed - e.g. a demanding game - the booster grows the buffer automatically, about 20 ms per audible dropout up to ~160 ms, instead of continuing to glitch. The status line shows the current value; stopping and restarting the boost resets it to ~60 ms;
@@ -72,6 +72,7 @@ this kit manages.
 - **Default output device only.** The boosted copy plays to the default device. If you switch output devices mid-boost, the booster stops safely - press Start again.
 - **System sounds as their own target are best-effort.** The Volume Mixer entry has process id 0; there is no supported API to capture that session alone. The checkbox tries anyway. If Windows refuses, use **Boost all audio on this device**, which includes system sounds because it captures everything except the booster.
 - **Boost all audio ducks every session** on the default device, not only the apps you had checked. New apps that start making sound are ducked too, until you stop.
+- **The booster will not boost an app it is running inside.** Per-app capture takes the target's whole process tree, so if you launch the booster *from* a program - a shell, a script, a terminal - and then boost that same program, it would capture its own boosted output, amplify it again, and run away into feedback at whatever the slider says. Double-clicking the exe is never affected, because its parent is Explorer. The case is detected before any audio starts and refused with an explanation; "Boost all audio" is immune either way, since it captures everything *except* the booster.
 - **Protected (DRM) audio paths** may deliver silence to the capture API; if an app produces silence when boosted, that is why.
 - **Anti-cheat safe by construction**: nothing is injected into any process - the audio is read through a public OS API, same as OBS. Games cannot tell the difference.
 - **Unsigned exe**: SmartScreen or an antivirus may warn on first run - expected for any home-built exe. The full source sits next to it, and `Build-Booster.cmd` reproduces the exe from that source using only Windows' own compiler.
@@ -110,6 +111,46 @@ this kit) survived every scenario with the correct value. Multi-app mixing
 uses that same per-stream gain on each capture, then sums and soft-clips.
 
 Re-verified 2026-09-20, after the multi-app rewrite and a review pass over the source: the code compiles warning-clean at `/warn:4`; the state file survived nine process kills timed across the write window, where a plain non-atomic write corrupted it in two of those nine; and a state-file update that cannot take the cross-process lock is now skipped rather than racing another booster instance.
+
+Fixed 2026-09-20: **per-app boost was not ducking anything at all.** The COM interop declared
+`IsSystemSoundsSession()` without `[PreserveSig]`, so .NET marshalled it as
+`HRESULT IsSystemSoundsSession([out,retval] int*)`. The real method takes no such pointer and
+never writes it, so the value read back was always 0 - "yes, this is the system sounds session"
+for *every* session on the device. `WantSession` therefore rejected every ordinary app, the
+target kept its slider at 100% while still being captured, and the captured signal was still
+multiplied by `boost / 0.04`. The result was constant heavy distortion at any slider position,
+including 100%. **Boost all audio was never affected**, because it returns true before reaching
+the system-sounds test - which is exactly why one mode sounded fine and the other did not.
+
+Confirmed by sampling the live mixer volumes at 50 ms for 10 s during a real browser boost: the
+browser session read 1.000 in all 164 samples, with zero transitions. With `[PreserveSig]` added,
+the same probe reports the browser and Discord as *not* system sounds and the real pid-0 session
+as system sounds, ducking resumes, and the boost sounds clean again.
+
+The same flaw applied to every other COM method in the file, so all 65 of them now carry
+`[PreserveSig]` and their `int` returns are finally real HRESULTs rather than a constant 0.
+That brings one rule with it: **an HRESULT is a failure only when it is negative.** Several
+calls made here legitimately return a non-zero *success* - `S_FALSE` from `Stop()` on an
+already-stopped client, `AUDCLNT_S_BUFFER_EMPTY` from `GetBuffer` - so `Native.Check` tests
+`hr < 0`, not `hr != 0`, which would have started throwing on perfectly good returns. Any new
+code that inspects one of these results has to do the same. The capture loop's
+`if (GetBuffer(...) != 0) break;` is deliberately left as-is and commented: there the only
+non-zero success means "no data", and breaking out is exactly the right response anyway.
+
+Verified after that pass by boosting a silent session and tracing its mixer volume: ducked
+1.000 -> 0.040 within 88 ms, held, restored to 1.000 the moment the timer expired, with
+`glitches=0` and precisely 6.01 s of audio captured. A session created *during* a boost was
+ducked 58 ms after it appeared, which exercises the session-notification callback - one of the
+two interfaces the program implements rather than calls, and the ones most at risk from a
+marshalling change.
+
+Added 2026-09-20: a guard against boosting a process tree that contains the booster itself.
+This was found the hard way, by doing it - the feedback is immediate and loud. The predicate
+was checked directly against the real method: targeting the parent shell reports true, while
+Discord and the browser report false, so ordinary targets are unaffected. End to end, the
+previously-catastrophic case now exits in about a second with "no capture stream started:
+... would feed back on itself" and never opens an audio stream, while an unrelated target
+still ducks to 0.040 and restores with glitches=0.
 
 ## Why this approach (alternatives considered)
 
