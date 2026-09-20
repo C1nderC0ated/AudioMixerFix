@@ -10,8 +10,8 @@ installation. If you never run it, it does nothing.
 |---|---|
 | `VolumeBooster\AppVolumeBooster.exe` | The tool (double-click). Needs nothing installed. |
 | `VolumeBooster\AppVolumeBooster.cs` | Complete source code, one file. |
-| `VolumeBooster\Build-Booster.cmd` | Rebuilds the exe using the C# compiler that ships inside Windows - works even on a freshly reinstalled machine with no tools. |
-| `VolumeBooster\booster-state.txt` | Appears only while a boost is active (crash-recovery data, see below). Deleted automatically. |
+| `VolumeBooster\Build-Booster.cmd` | Rebuilds the exe using the C# compiler that ships inside Windows - works even on a freshly reinstalled machine with no tools. It compiles to a temporary file and only then replaces the exe, so a failed rebuild leaves the working binary you already had and exits non-zero instead of reporting success. |
+| `VolumeBooster\booster-state.txt` | Appears only while a boost is active (crash-recovery data, see below). Deleted automatically. Written through a temporary file and an atomic replace, so killing the booster during the write cannot leave it truncated. |
 
 ## How to use it
 
@@ -60,7 +60,7 @@ multi-app uses the same restore path per target):
 |---|---|
 | You press Stop / close the booster | Sliders restored instantly. Verified. |
 | A boosted app exits or crashes while boosting | That app's saved volume is restored. If other selected apps remain, boosting continues; if it was the last one, the booster stops. Verified for the single-app case: the app came back at its old volume on relaunch. |
-| The booster itself is killed hard (or PC loses power) mid-boost | Windows may persist the 4%. The booster leaves a note in `booster-state.txt`; the next time ANY copy of the booster runs (and every few seconds while one is open), it finds each ducked app (and system sounds, if that was the target) and repairs the slider to the saved value. Verified. |
+| The booster itself is killed hard (or PC loses power) mid-boost | Windows may persist the 4%. The booster leaves a note in `booster-state.txt`; the next time ANY copy of the booster runs (and every few seconds while one is open), it finds each ducked app (and system sounds, if that was the target) and repairs the slider to the saved value. The note itself is written atomically, so a kill landing *during* that write leaves the previous contents intact rather than a half-written file. Verified, including kills timed into the write. |
 | Nothing else available | Just drag the slider(s) back up in the Volume Mixer - they are ordinary volume values, nothing is locked. |
 
 The booster never touches the registry, the PropertyStore, or anything else
@@ -82,7 +82,7 @@ this kit manages.
 
 ```
 AppVolumeBooster.exe --pid <N> [--pid <N> ...] | --name <exe> [--name <exe> ...] | --all
-    [--system-sounds] [--boost 100..500] [--seconds <S>] [--log <file>]
+    [--system-sounds] [--boost 100..500] [--seconds <S>] [--padms <10..150>] [--log <file>]
 ```
 
 Runs headless: boosts the given process(es) until they close, `--seconds`
@@ -92,6 +92,11 @@ and writes a one-line result to `--log`.
 - Repeat `--pid` / `--name` to boost several programs at once (`--name` matches every running process of that exe).
 - `--system-sounds` includes the Windows System sounds session when the OS allows that capture.
 - `--all` boosts every sound on the default device, including system sounds (the app list is ignored).
+- `--system` is accepted as a synonym for `--system-sounds`.
+- `--padms` sets the starting render-buffer size in milliseconds (10-150, default ~50). It exists for latency testing; leave it alone otherwise.
+- An unrecognised or misspelled argument is an **error**: the run stops with exit code 1 rather than quietly continuing on the defaults, which is what `--bost 300` used to do. A flag with no value - at the end of the line, or followed by another flag - is reported the same way.
+- `--boost` is clamped to 100-500, and the `--log` line reports the value actually applied rather than the one requested, so `--boost 5000` logs `boost=500`.
+- This is a windowless exe with no console, so `--log` is the only place any error can appear. It is resolved before the rest of the command line is parsed, so even an argument error still reaches the log file.
 
 ## How this was verified (2026-08-23, this machine)
 
@@ -103,6 +108,8 @@ close-while-boosted, kill-while-boosted, and self-heal paths were each
 exercised with real process kills; per-app volume memory (the main subject of
 this kit) survived every scenario with the correct value. Multi-app mixing
 uses that same per-stream gain on each capture, then sums and soft-clips.
+
+Re-verified 2026-09-20, after the multi-app rewrite and a review pass over the source: the code compiles warning-clean at `/warn:4`; the state file survived nine process kills timed across the write window, where a plain non-atomic write corrupted it in two of those nine; and a state-file update that cannot take the cross-process lock is now skipped rather than racing another booster instance.
 
 ## Why this approach (alternatives considered)
 
