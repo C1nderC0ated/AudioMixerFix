@@ -30,7 +30,10 @@
 //
 // CLI (for scripting/testing; the GUI appears when run with no args):
 //   AppVolumeBooster.exe --pid <N> [--pid <N> ...] | --name <exe> [--name <exe> ...]
-//       | --all  [--system-sounds] [--boost 100..500] [--seconds <S>] [--log <file>]
+//       | --all  [--system-sounds|--system] [--boost 100..500] [--seconds <S>]
+//       [--padms <10..150>] [--log <file>]
+//   Anything not in that list is rejected, not ignored. This list is mirrored in
+//   VOLUME-BOOSTER.md - keep the parser, this comment and that file in step.
 // =====================================================================================
 using System;
 using System.Collections.Generic;
@@ -461,6 +464,56 @@ namespace AppVolumeBoosterNs
             return new Mutex(false, "AppVolumeBooster.StateFile");
         }
 
+        // Runs 'work' under the cross-process state-file lock, and reports whether the
+        // lock was actually taken. The timeout used to be ignored: on a contended
+        // machine two boosters could each read, then each write, and the loser's line -
+        // a slider still ducked at 4% - simply vanished. Skipping the update is the safe
+        // failure, because SelfHeal re-checks the real slider level before acting anyway.
+        // An abandoned mutex means the previous owner died holding it; we hold it now.
+        static bool UnderLock(ThreadStart work)
+        {
+            Mutex m = Mtx();
+            bool held = false;
+            try
+            {
+                try { held = m.WaitOne(3000); }
+                catch (AbandonedMutexException) { held = true; }
+                catch { held = false; }
+                if (!held) return false;
+                try { work(); }
+                catch { }
+                return true;
+            }
+            finally
+            {
+                if (held) { try { m.ReleaseMutex(); } catch { } }
+                m.Close();
+            }
+        }
+
+        // Temp file + Replace. This file exists precisely so that killing the booster
+        // cannot strand a ducked slider, so it must never be caught half-written by
+        // exactly that. On failure the previous contents survive, which is the safe
+        // direction: a stale line gets re-checked against the live slider, a lost one
+        // is gone for good.
+        static void WriteAll(List<string> lines)
+        {
+            string path = PathOf();
+            if (lines.Count == 0) { try { File.Delete(path); } catch { } return; }
+            string tmp = path + ".tmp";
+            try
+            {
+                File.WriteAllLines(tmp, lines.ToArray());
+                if (File.Exists(path)) File.Replace(tmp, path, null);
+                else File.Move(tmp, path);
+            }
+            catch
+            {
+                try { if (File.Exists(tmp)) File.Delete(tmp); }
+                catch { }
+            }
+        }
+
         static string OwnPid()
         {
             return Process.GetCurrentProcess().Id.ToString();
@@ -473,10 +526,8 @@ namespace AppVolumeBoosterNs
 
         public static void AddOwn(string targetExe, float prior)
         {
-            Mutex m = Mtx();
-            try
+            UnderLock(delegate()
             {
-                m.WaitOne(3000);
                 List<string> lines = ReadAll();
                 string own = OwnPid();
                 lines.RemoveAll(delegate(string l)
@@ -485,34 +536,25 @@ namespace AppVolumeBoosterNs
                     return parts.Length == 3 && parts[0] == own && SameTarget(parts[1], targetExe);
                 });
                 lines.Add(own + "|" + targetExe + "|" + prior.ToString("F4", CultureInfo.InvariantCulture));
-                File.WriteAllLines(PathOf(), lines.ToArray());
-            }
-            catch { }
-            finally { try { m.ReleaseMutex(); } catch { } m.Close(); }
+                WriteAll(lines);
+            });
         }
 
         public static void RemoveOwn()
         {
-            Mutex m = Mtx();
-            try
+            UnderLock(delegate()
             {
-                m.WaitOne(3000);
                 List<string> lines = ReadAll();
                 string own = OwnPid();
                 lines.RemoveAll(delegate(string l) { return l.StartsWith(own + "|"); });
-                if (lines.Count == 0) { try { File.Delete(PathOf()); } catch { } }
-                else File.WriteAllLines(PathOf(), lines.ToArray());
-            }
-            catch { }
-            finally { try { m.ReleaseMutex(); } catch { } m.Close(); }
+                WriteAll(lines);
+            });
         }
 
         public static void RemoveTarget(string targetExe)
         {
-            Mutex m = Mtx();
-            try
+            UnderLock(delegate()
             {
-                m.WaitOne(3000);
                 List<string> lines = ReadAll();
                 string own = OwnPid();
                 lines.RemoveAll(delegate(string l)
@@ -520,11 +562,8 @@ namespace AppVolumeBoosterNs
                     string[] parts = l.Split('|');
                     return parts.Length == 3 && parts[0] == own && SameTarget(parts[1], targetExe);
                 });
-                if (lines.Count == 0) { try { File.Delete(PathOf()); } catch { } }
-                else File.WriteAllLines(PathOf(), lines.ToArray());
-            }
-            catch { }
-            finally { try { m.ReleaseMutex(); } catch { } m.Close(); }
+                WriteAll(lines);
+            });
         }
 
         // Mark matching own lines as orphaned (boosterPid 0) so any later SelfHeal
@@ -536,10 +575,8 @@ namespace AppVolumeBoosterNs
 
         public static void OrphanTarget(string targetExe)
         {
-            Mutex m = Mtx();
-            try
+            UnderLock(delegate()
             {
-                m.WaitOne(3000);
                 List<string> lines = ReadAll();
                 string own = OwnPid();
                 for (int i = 0; i < lines.Count; i++)
@@ -548,32 +585,27 @@ namespace AppVolumeBoosterNs
                     if (parts.Length == 3 && parts[0] == own && SameTarget(parts[1], targetExe))
                         lines[i] = "0" + lines[i].Substring(own.Length);
                 }
-                File.WriteAllLines(PathOf(), lines.ToArray());
-            }
-            catch { }
-            finally { try { m.ReleaseMutex(); } catch { } m.Close(); }
+                WriteAll(lines);
+            });
         }
 
         static void RewriteOwnPrefix(string newPid)
         {
-            Mutex m = Mtx();
-            try
+            UnderLock(delegate()
             {
-                m.WaitOne(3000);
                 List<string> lines = ReadAll();
                 string own = OwnPid();
                 for (int i = 0; i < lines.Count; i++)
                     if (lines[i].StartsWith(own + "|")) lines[i] = newPid + lines[i].Substring(own.Length);
-                File.WriteAllLines(PathOf(), lines.ToArray());
-            }
-            catch { }
-            finally { try { m.ReleaseMutex(); } catch { } m.Close(); }
+                WriteAll(lines);
+            });
         }
 
         static List<string> ReadAll()
         {
             List<string> r = new List<string>();
-            try { if (File.Exists(PathOf())) r.AddRange(File.ReadAllLines(PathOf())); } catch { }
+            try { if (File.Exists(PathOf())) r.AddRange(File.ReadAllLines(PathOf())); }
+            catch { }
             return r;
         }
 
@@ -591,13 +623,11 @@ namespace AppVolumeBoosterNs
         // them once the app reappears; lines whose app is seen healthy are resolved.
         public static string SelfHeal()
         {
-            Mutex m = Mtx();
             List<string> healedNames = new List<string>();
-            try
+            UnderLock(delegate()
             {
-                m.WaitOne(3000);
                 List<string> lines = ReadAll();
-                if (lines.Count == 0) return null;
+                if (lines.Count == 0) return;
                 List<string> keep = new List<string>();
                 List<string[]> dead = new List<string[]>();
                 foreach (string l in lines)
@@ -651,11 +681,8 @@ namespace AppVolumeBoosterNs
                     for (int di = 0; di < dead.Count; di++)
                         if (!resolved[di]) keep.Add(string.Join("|", dead[di]));
                 }
-                if (keep.Count == 0) { try { File.Delete(PathOf()); } catch { } }
-                else File.WriteAllLines(PathOf(), keep.ToArray());
-            }
-            catch { }
-            finally { try { m.ReleaseMutex(); } catch { } m.Close(); }
+                WriteAll(keep);
+            });
             if (healedNames.Count == 0) return null;
             for (int i = 0; i < healedNames.Count; i++)
                 if (healedNames[i] == K.SysSoundsName) healedNames[i] = "system sounds";
@@ -768,6 +795,9 @@ namespace AppVolumeBoosterNs
         }
 
         public int LatencyMs { get { return targetPadFrames / 48 + 10; } }
+        // The boost actually in force after clamping. The CLI used to log the
+        // REQUESTED percentage, so --boost 5000 logged 5000 while running at 500.
+        public int BoostPercent { get { return (int)Math.Round((double)(boost * 100.0f)); } }
         public bool BoostAll { get { return boostAll; } }
 
         public void SetInitialPadMs(int ms)
@@ -1757,26 +1787,50 @@ namespace AppVolumeBoosterNs
             return 0;
         }
 
+        // Consumes the value that follows a flag. A flag at the end of the line has
+        // no value; so does one followed by another flag ("--boost --log x"), which
+        // would otherwise be parsed AS the value and fail with a raw FormatException.
+        static string NextValue(string flag, string[] args, ref int i)
+        {
+            if (i + 1 >= args.Length) throw new ArgumentException("missing value after " + flag);
+            string v = args[i + 1];
+            if (v.StartsWith("--")) throw new ArgumentException("missing value after " + flag + " (next token is " + v + ")");
+            i++;
+            return v;
+        }
+
         static int CliMain(string[] args)
         {
             List<uint> pids = new List<uint>();
             List<string> names = new List<string>();
             int boostPct = 150; double seconds = 0; string log = null; int padMs = 0;
             bool all = false; bool sys = false;
-            for (int i = 0; i < args.Length; i++)
-            {
-                string a = args[i].ToLowerInvariant();
-                if (a == "--pid" && i + 1 < args.Length) pids.Add(uint.Parse(args[++i]));
-                else if (a == "--name" && i + 1 < args.Length) names.Add(args[++i]);
-                else if (a == "--boost" && i + 1 < args.Length) boostPct = int.Parse(args[++i]);
-                else if (a == "--seconds" && i + 1 < args.Length) seconds = double.Parse(args[++i], CultureInfo.InvariantCulture);
-                else if (a == "--padms" && i + 1 < args.Length) padMs = int.Parse(args[++i]);
-                else if (a == "--log" && i + 1 < args.Length) log = args[++i];
-                else if (a == "--all") all = true;
-                else if (a == "--system-sounds" || a == "--system") sys = true;
-            }
+
+            // --log is resolved before anything can throw: this is a /t:winexe with no
+            // console attached, so the log file is the only channel an argument error
+            // has to reach the caller at all.
+            for (int i = 0; i + 1 < args.Length; i++)
+                if (string.Equals(args[i], "--log", StringComparison.OrdinalIgnoreCase)) log = args[i + 1];
+
             try
             {
+                // Parsing lives inside the try so a malformed number is reported rather
+                // than crashing, and an unrecognised flag is rejected rather than
+                // dropped: "--bost 300" used to run silently at the default 150.
+                for (int i = 0; i < args.Length; i++)
+                {
+                    string a = args[i].ToLowerInvariant();
+                    if (a == "--pid") pids.Add(uint.Parse(NextValue(a, args, ref i), CultureInfo.InvariantCulture));
+                    else if (a == "--name") names.Add(NextValue(a, args, ref i));
+                    else if (a == "--boost") boostPct = int.Parse(NextValue(a, args, ref i), CultureInfo.InvariantCulture);
+                    else if (a == "--seconds") seconds = double.Parse(NextValue(a, args, ref i), CultureInfo.InvariantCulture);
+                    else if (a == "--padms") padMs = int.Parse(NextValue(a, args, ref i), CultureInfo.InvariantCulture);
+                    else if (a == "--log") log = NextValue(a, args, ref i);
+                    else if (a == "--all") all = true;
+                    else if (a == "--system-sounds" || a == "--system") sys = true;
+                    else throw new ArgumentException("unknown argument: " + args[i]);
+                }
+
                 StateFile.SelfHeal();
                 foreach (string name in names)
                 {
@@ -1802,7 +1856,7 @@ namespace AppVolumeBoosterNs
                 eng.Stop(true);
                 string line = string.Format(CultureInfo.InvariantCulture,
                     "ok capSamples={0} renFrames={1} glitches={2} boost={3} latencyMs={4} targets={5} stopReason={6}",
-                    eng.CapSamples, eng.RenFrames, eng.Glitches, boostPct, eng.LatencyMs, eng.TargetSummary, why == "" ? "timer" : why);
+                    eng.CapSamples, eng.RenFrames, eng.Glitches, eng.BoostPercent, eng.LatencyMs, eng.TargetSummary, why == "" ? "timer" : why);
                 if (log != null) File.WriteAllText(log, line + "\r\n");
                 return 0;
             }
