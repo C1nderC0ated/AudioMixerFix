@@ -5,6 +5,7 @@ title Rebuild AppVolumeBooster.exe
 rem Rebuilds AppVolumeBooster.exe from AppVolumeBooster.cs using the C# compiler
 rem that ships INSIDE Windows (.NET Framework 4.x) - no SDK, no internet, no admin.
 rem Works on any Windows 10/11 machine, including right after a reinstall.
+rem The booster can target several apps at once, system sounds, or all audio.
 
 set "CSC=%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 if not exist "%CSC%" set "CSC=%WINDIR%\Microsoft.NET\Framework\v4.0.30319\csc.exe"
