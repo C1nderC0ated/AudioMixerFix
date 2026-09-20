@@ -82,7 +82,7 @@ It works correctly regardless of your system's language settings (for example, o
 
 | Command | What it does |
 |---|---|
-| `Fix-AudioMixer.cmd` (double-click) | This file automatically elevates its permissions and applies the main fixes. |
+| `Fix-AudioMixer.cmd` (double-click) | This file automatically elevates its permissions and applies the main fixes. The elevated window waits for a keypress before closing, so you can actually read the results, and if you decline the administrator prompt it tells you nothing was changed instead of closing silently. |
 | `Check-Store.bat` (double-click) | This provides a quick visual check. It lists applications with saved volumes in both store variants and gives a clear result. No administrator rights are required. |
 | `.\Fix-AudioMixer.ps1` | This performs the main fixes: it disables the cleaner rule, manages the store and its label, adjusts services, and sets browser flags. |
 | `.\Fix-AudioMixer.ps1 -CheckOnly` | This reports what any mode *would* do without making any changes. |
@@ -93,7 +93,9 @@ It works correctly regardless of your system's language settings (for example, o
 | `.\Fix-AudioMixer.ps1 -DisableEnhancements` | **This is an optional action.** It turns off "Audio enhancements" for every active output. This sets the documented `Disable_SysFx` value to 1, and the endpoint key is backed up beforehand. A reboot is needed afterwards. |
 | `.\Fix-AudioMixer.ps1 -DisableBtAbsoluteVolume` / `-EnableBtAbsoluteVolume` | **This is an optional action.** Use this to change the Bluetooth absolute volume setting (`HKLM\SYSTEM\CurrentControlSet\Control\Bluetooth\Audio\AVRCP\CT\DisableAbsoluteVolume`). **A reboot is required.** This change affects all Bluetooth audio devices globally. |
 
-The `-CheckOnly` command can be combined with the optional switches. For example, you can use `.\Fix-AudioMixer.ps1 -DisableEnhancements -CheckOnly`.
+The `-CheckOnly` command can be combined with the optional switches. For example, you can use `.\Fix-AudioMixer.ps1 -DisableEnhancements -CheckOnly`. 
+Only one action switch runs per invocation. Passing two that contradict each other (say `-DisableBtAbsoluteVolume -EnableBtAbsoluteVolume`) is refused by name rather than silently running whichever comes first. 
+Exit codes: **0** nothing failed, **1** at least one `[FAIL]` line, **2** the command line itself was wrong.
 
 ---
 
@@ -155,7 +157,8 @@ This script will detect and create any missing components, such as the store, la
 
 - To revert browser flags, use `-Revert`. For Bluetooth, use `-EnableBtAbsoluteVolume` and then restart your computer.
 - For enhancements, either reset the endpoint's `{1da5d803-d492-4edd-8c23-e0c0ffee7f0e},5` value to 0 (or delete it), or use the toggle in Settings. Timestamped `.reg` backups of all affected endpoints are in the `backups\` folder.
-- All other changes have timestamped copies in `backups\`, including `bleachbit.ini.*`, `PropertyStore.*.reg`, `*.lnk.*.bak`, and `endpoint.*.reg`.
+- All other changes have timestamped copies in `backups\`, including `bleachbit.ini.*`, `PropertyStore.*.reg`, `*.lnk.*.bak`, and `endpoint.*.reg`. 
+- Shortcut backups are named `<name>.lnk.<hash>.<timestamp>.bak`. The hash identifies which folder the shortcut came from: Desktop, the Start Menu and the taskbar pin folder routinely hold shortcuts with the *same* file name, so the name alone cannot tell them apart. `backups\shortcut-sources.txt` maps every backup file back to the exact path it was copied from.
 
 ## Primary Information Sources
 
