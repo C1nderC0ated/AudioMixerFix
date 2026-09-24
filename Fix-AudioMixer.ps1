@@ -19,7 +19,7 @@ canonical: HKCU\Software\Microsoft\Internet Explorer\LowRegistry\Audio\PolicyCon
 variant: HKCU\Software\Microsoft\Multimedia\Audio\PolicyConfig\PropertyStore
 (The claim circulating online about the "%LocalAppData%\Microsoft\Windows\Audio\AppVolume" folder could not be confirmed by any official source, so the script ignores it.)
 
-You can run this script multiple times without issue. It creates backups of any changes it makes, storing them in a "backups" folder next to the script itself.
+You can run this script multiple times without issue. It creates backups of any changes it makes, storing them in a "backups" folder next to the script itself - or, when that folder cannot be written, in %LOCALAPPDATA%\AudioMixerFix\backups (the run says so).
 The script is compatible with different regional settings, as it only uses SIDs, service names, and registry values, and never processes localized command output.
 
 USAGE (run in an elevated PowerShell window, or double-click Fix-AudioMixer.cmd):
@@ -42,7 +42,12 @@ param(
     [switch]$CleanGhostEndpoints,
     [switch]$DisableEnhancements,
     [switch]$DisableBtAbsoluteVolume,
-    [switch]$EnableBtAbsoluteVolume
+    [switch]$EnableBtAbsoluteVolume,
+    # Everything else on the command line lands here, so a misspelled switch is reported
+    # by name and exits 2 like the other command-line errors. Without it PowerShell itself
+    # rejected the parameter before the script ran - with exit 1, the code that means "a
+    # fix failed", while the README promised 2.
+    [Parameter(ValueFromRemainingArguments = $true)] [string[]]$Unrecognized
 )
 
 $ErrorActionPreference = 'Stop'
@@ -63,8 +68,9 @@ function Section([string]$t) { Write-Host ''; Write-Host "== $t ==" -ForegroundC
 
 # ---- constants -------------------------------------------------------------
 # Both are known store variants. 'Sub' is the HKCU-relative path for the label API.
-# NOTE: Check-Store.bat mirrors this list in its own $paths/$names arrays, and README.md
-# documents it in a table. Three copies - change one, change all three.
+# NOTE: this list exists in FOUR places - this array, the help block at the top of this
+# file, Check-Store.bat's own $paths/$names arrays, and the table in README.md. Change one,
+# change all four (tests\script\Consistency.Tests.ps1 compares them).
 $Stores = @(
     @{ Name = 'canonical (IE LowRegistry)';
        Reg  = 'HKCU\Software\Microsoft\Internet Explorer\LowRegistry\Audio\PolicyConfig\PropertyStore';
@@ -76,6 +82,9 @@ $Stores = @(
        Sub  = 'Software\Microsoft\Multimedia\Audio\PolicyConfig\PropertyStore' }
 )
 $BrowserFlags = '--disable-features=AudioServiceSandbox,AudioServiceOutOfProcess'
+$BrowserFeatures = @('AudioServiceSandbox', 'AudioServiceOutOfProcess')
+# README.md names these browsers in its symptom table (browser.exe is Yandex Browser) -
+# change one, change both.
 $BrowserExes  = @('thorium.exe','chrome.exe','msedge.exe','brave.exe','vivaldi.exe','opera.exe','opera_gx.exe','browser.exe')
 $BtCtKey      = 'HKLM:\SYSTEM\CurrentControlSet\Control\Bluetooth\Audio\AVRCP\CT'
 $BtCtReg      = 'HKLM\SYSTEM\CurrentControlSet\Control\Bluetooth\Audio\AVRCP\CT'
@@ -86,7 +95,69 @@ $ScriptDir    = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $
 $BackupDir    = Join-Path $ScriptDir 'backups'
 $Elevated     = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
-function Ensure-BackupDir { if (-not (Test-Path $BackupDir)) { New-Item -ItemType Directory -Force -Path $BackupDir | Out-Null } }
+# ---- whose profile is this? ------------------------------------------------
+# HKCU, %APPDATA% and the Desktop belong to whoever this process RUNS AS. On a
+# standard-user account, UAC elevation with an administrator's password runs the
+# script as that administrator - so every per-user fix used to land on the admin's
+# profile while printing [OK], and the real user was left unfixed. The owner of this
+# session's desktop (explorer.exe) is the real user. Compared by SID, never by name,
+# so it holds on any display language. If the owner cannot be determined (no
+# explorer, WMI unavailable) nothing is blocked - the old behaviour is kept.
+function Get-DesktopOwnerSid {
+    try {
+        $sess = (Get-Process -Id $PID).SessionId
+        $ex = @(Get-CimInstance Win32_Process -Filter ("Name='explorer.exe' AND SessionId={0}" -f $sess) -ErrorAction Stop) | Select-Object -First 1
+        if (-not $ex) { return $null }
+        $r = Invoke-CimMethod -InputObject $ex -MethodName GetOwnerSid -ErrorAction Stop
+        if ($r.ReturnValue -ne 0) { return $null }
+        return $r.Sid
+    } catch { return $null }
+}
+$MyIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$script:WrongProfileCache = $null
+# Lazy (one WMI query, ~0.1-0.3 s): only the steps that touch per-user state pay for it.
+function Test-WrongProfile {
+    if ($null -eq $script:WrongProfileCache) {
+        $d = Get-DesktopOwnerSid
+        $script:WrongProfileCache = [bool]($d -and $d -ne $MyIdentity.User.Value)
+    }
+    $script:WrongProfileCache
+}
+
+function Test-PerUserAllowed([string]$what) {
+    if (-not (Test-WrongProfile)) { return $true }
+    Report FAIL ("Skipped {0}: this window runs as {1}, but the desktop belongs to a different account, so the change would land on the wrong profile. Run Fix-AudioMixer.ps1 again from an ordinary PowerShell window as yourself - this step needs no admin rights." -f $what, $MyIdentity.Name)
+    return $false
+}
+
+# Backups go to the 'backups' folder next to this script. When that cannot be written - the
+# kit on a write-protected stick or a read-only share - they go to
+# %LOCALAPPDATA%\AudioMixerFix\backups instead, and the run says so. This used to create the
+# folder next to the script unconditionally, and under $ErrorActionPreference = 'Stop' the
+# first backup that could not be written ended the whole run with a raw PowerShell error.
+# A folder that exists is no proof it can be written to, so each candidate gets a test write.
+$script:BackupDirReady = $false
+# Every check on a backup file uses -LiteralPath: to -Path, [ and ] are wildcards, so from a
+# kit folder named like "AudioMixerFix [v2]" a backup that existed tested as missing, and
+# -RebuildStore / -CleanGhostEndpoints / -DisableEnhancements refused with "Backup FAILED".
+function Ensure-BackupDir {
+    if ($script:BackupDirReady) { return }
+    $cands = @($BackupDir)
+    if ($env:LOCALAPPDATA) { $cands += [IO.Path]::Combine($env:LOCALAPPDATA, 'AudioMixerFix\backups') }
+    foreach ($c in $cands) {
+        try {
+            if (-not (Test-Path -LiteralPath $c -PathType Container)) { New-Item -ItemType Directory -Force -Path $c -ErrorAction Stop | Out-Null }
+            $probe = Join-Path $c ('.write-test.' + $PID)
+            [IO.File]::WriteAllText($probe, '')
+            Remove-Item -LiteralPath $probe -Force -ErrorAction Stop
+        } catch { continue }
+        if ($c -ne $cands[0]) { Report INFO ("The script's folder cannot be written to, so backups go to {0}" -f $c) }
+        $script:BackupDir = $c
+        $script:BackupDirReady = $true
+        return
+    }
+    throw ("no folder for backups could be written ({0}), so nothing was changed here" -f ($cands -join ', '))
+}
 function Stamp { (Get-Date).ToString('yyyyMMdd-HHmmss') }
 
 function Backup-Shortcut([System.IO.FileInfo]$lnk) {
@@ -229,7 +300,7 @@ function Resolve-ApoVendor([string]$clsid) {
             $dll  = $ip.'(default)'
             $name = (Get-ItemProperty "$root\$clsid" -ErrorAction SilentlyContinue).'(default)'
             $co   = ''
-            if ($dll -and (Test-Path $dll)) { $co = (Get-Item $dll).VersionInfo.CompanyName }
+            if ($dll -and (Test-Path -LiteralPath $dll)) { $co = (Get-Item -LiteralPath $dll).VersionInfo.CompanyName }
             return [pscustomobject]@{ Clsid = $clsid; Name = $name; Dll = $dll; Company = $co }
         }
     }
@@ -243,14 +314,17 @@ function Get-Shortcuts {
         (Join-Path $env:APPDATA     'Microsoft\Windows\Start Menu\Programs'),
         (Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs'),
         (Join-Path $env:APPDATA     'Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar')
-    ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+    ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique
     if (-not $dirs) { return @() }
-    Get-ChildItem -Path $dirs -Filter *.lnk -Recurse -ErrorAction SilentlyContinue
+    Get-ChildItem -LiteralPath $dirs -Filter *.lnk -Recurse -ErrorAction SilentlyContinue
 }
 
 # ---- STATUS / DIAGNOSIS ----------------------------------------------------
 function Show-Status([bool]$Deep) {
     Section 'Store variants and saved per-app volumes'
+    if (Test-WrongProfile) {
+        Report WARN ("This window runs as {0}, not as the desktop's user, so the store shown below is {0}'s - not yours. Run -Status from an ordinary PowerShell window to see your own." -f $MyIdentity.Name)
+    }
     $found = Get-ExistingStores
     if ($found.Count -eq 0) {
         Report WARN 'NO PropertyStore key exists (either variant). Volumes cannot persist. Run the default fix or -RebuildStore.'
@@ -338,8 +412,9 @@ function Show-Status([bool]$Deep) {
 # ---- FIX 1: BleachBit cleaner rule -----------------------------------------
 function Fix-BleachBit {
     Section 'BleachBit "Windows Volume Mixer" cleaner rule (root cause on this machine)'
+    if (-not (Test-PerUserAllowed 'the BleachBit rule')) { return }
     $ini = Join-Path $env:APPDATA 'BleachBit\bleachbit.ini'
-    if (-not (Test-Path $ini)) { Report INFO 'BleachBit config not found for this user. Nothing to disable.'; return }
+    if (-not (Test-Path -LiteralPath $ini)) { Report INFO 'BleachBit config not found for this user. Nothing to disable.'; return }
     $key   = 'winapp2_windows.windows_volume_mixer'
     $lines = @(Get-Content -LiteralPath $ini)
     $idx = -1
@@ -350,6 +425,13 @@ function Fix-BleachBit {
     $cur = (($lines[$idx] -split '=', 2)[1]).Trim()
     if ($cur -eq 'False') { Report OK 'Rule already disabled (= False).'; return }
     if ($CheckOnly) { Report WARN ("Rule is '{0}' - WOULD set it to False." -f $cur); return }
+    # BleachBit writes its whole configuration back whenever it saves, so a copy that is
+    # open right now can put the rule straight back over this edit - while this script
+    # has already reported [OK]. Ask for it to be closed instead of racing it.
+    if (@(Get-Process -Name 'bleachbit*' -ErrorAction SilentlyContinue).Count -gt 0) {
+        Report WARN 'BleachBit is open - close it and run this again; while it runs it can save its current settings over this change.'
+        return
+    }
     Ensure-BackupDir
     Copy-Item -LiteralPath $ini -Destination (Join-Path $BackupDir ('bleachbit.ini.' + (Stamp) + '.bak')) -Force
     $lines[$idx] = "$key = False"
@@ -361,6 +443,7 @@ function Fix-BleachBit {
 # ---- FIX 2: store key(s) + low integrity label -----------------------------
 function Fix-Store {
     Section 'Per-app volume store: key + low integrity label (both variants probed)'
+    if (-not (Test-PerUserAllowed 'the volume store and its label')) { return }
     Initialize-RegLabel
     $found = Get-ExistingStores
     if ($CheckOnly) {
@@ -385,7 +468,10 @@ function Fix-Store {
         $k = Get-Item $s.PS
         if ($k.SubKeyCount -gt 0) { & reg.exe export $s.Reg (Join-Path $BackupDir ('PropertyStore.' + ($s.Name -replace '[^A-Za-z]','') + '.' + (Stamp) + '.reg')) /y | Out-Null }
         $label = [RegLabel]::Get($s.Sub)
-        if ($label -like '*;LW*') {
+        # The exact label Windows itself uses: Low, inherited by subkeys (OICI), no-write-up
+        # only. This used to accept anything containing ";LW" - e.g. a Low label without
+        # inheritance, so every per-app subkey created later came out Medium.
+        if ($label -match '\(ML;(OICI|CIOI);NW;;;LW\)') {
             Report OK ("{0}: low-integrity label OK ({1})" -f $s.Name, $label)
         } else {
             $r = [RegLabel]::SetLow($s.Sub)
@@ -398,26 +484,57 @@ function Fix-Store {
 # ---- OPT-IN: rebuild the store natively ------------------------------------
 function Rebuild-Store {
     Section 'REBUILD store: delete + let the Windows Audio service recreate it'
+    if (-not (Test-PerUserAllowed 'rebuilding the volume store')) { return }
     Initialize-RegLabel
     Report INFO 'This is the "let Windows do it" repair. WARNING: all RUNNING apps reset to 100% when the audio service restarts.'
     if (-not $Elevated) { Report FAIL 'Requires admin (service restart). Re-run elevated.'; return }
     $found = Get-ExistingStores
     if ($CheckOnly) { Report INFO ("WOULD: backup + delete {0} store(s), restart Audiosrv/AudioEndpointBuilder, let Windows rebuild." -f $found.Count); return }
     Ensure-BackupDir
-    foreach ($s in $found) { & reg.exe export $s.Reg (Join-Path $BackupDir ('PropertyStore.' + ($s.Name -replace '[^A-Za-z]','') + '.' + (Stamp) + '.reg')) /y | Out-Null }
+    # Every saved per-app volume lives in these keys and is about to be deleted, so the
+    # backup is the only way back. reg.exe reports failure only through its exit code
+    # and writes no file when it fails; unchecked, a failed export was followed by the
+    # delete anyway. Verify each one, and stop before touching anything if one is bad.
+    foreach ($s in $found) {
+        $bk = Join-Path $BackupDir ('PropertyStore.' + ($s.Name -replace '[^A-Za-z]','') + '.' + (Stamp) + '.reg')
+        & reg.exe export $s.Reg $bk /y | Out-Null
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $bk) -or (Get-Item -LiteralPath $bk).Length -eq 0) {
+            Report FAIL ("Backup of {0} FAILED (reg.exe exit {1}) - refusing to delete the store without it. Nothing was changed." -f $s.Name, $LASTEXITCODE)
+            return
+        }
+        Report OK ("Backed up {0} -> {1}" -f $s.Name, (Split-Path $bk -Leaf))
+    }
+    # Both outcomes below are tracked, so the closing line can only claim what actually
+    # happened. It used to say "Store deleted and audio service restarted" unconditionally
+    # - even directly under a [FAIL] for that very restart, or after a delete that failed.
+    $deleted = $true
+    $restarted = $true
+    # From the first Stop-Service to the restart is ONE try/finally, so the services are
+    # started again however this part ends. A stop that only half worked (Audiosrv down,
+    # AudioEndpointBuilder refusing) used to return straight away and leave the machine
+    # with no audio until a reboot - and so would any error nobody anticipated.
     try {
-        Stop-Service -Name Audiosrv -Force -ErrorAction Stop
-        Stop-Service -Name AudioEndpointBuilder -Force -ErrorAction Stop
-    } catch { Report FAIL ("Could not stop audio services: {0}" -f $_.Exception.Message); return }
-    foreach ($s in $found) { & reg.exe delete $s.Reg /f | Out-Null }
-    # Guarded on purpose: $ErrorActionPreference is 'Stop', so an unguarded failure
-    # here aborts the whole script - skipping the recovery below, the Summary and the
-    # exit code - and leaves the machine with the audio stack down and no explanation.
-    foreach ($svc in 'AudioEndpointBuilder','Audiosrv') {
-        try { Start-Service -Name $svc -ErrorAction Stop }
-        catch {
-            Report FAIL ("Could not restart {0}: {1}" -f $svc, $_.Exception.Message)
-            Report INFO 'Start it from services.msc (or reboot) before relying on audio again.'
+        try {
+            Stop-Service -Name Audiosrv -Force -ErrorAction Stop
+            Stop-Service -Name AudioEndpointBuilder -Force -ErrorAction Stop
+        } catch { Report FAIL ("Could not stop audio services: {0}" -f $_.Exception.Message); return }
+        foreach ($s in $found) {
+            & reg.exe delete $s.Reg /f | Out-Null
+            if ($LASTEXITCODE -ne 0 -or (Test-Path $s.PS)) {
+                $deleted = $false
+                Report FAIL ("Could not delete {0} (reg.exe exit {1}) - it was NOT cleared." -f $s.Name, $LASTEXITCODE)
+            }
+        }
+    } finally {
+        # Each start is guarded on its own: $ErrorActionPreference is 'Stop', so one failure
+        # must not skip the other start, the checks below, the Summary or the exit code.
+        foreach ($svc in 'AudioEndpointBuilder','Audiosrv') {
+            try { Start-Service -Name $svc -ErrorAction Stop }
+            catch {
+                $restarted = $false
+                Report FAIL ("Could not restart {0}: {1}" -f $svc, $_.Exception.Message)
+                Report INFO 'Start it from services.msc (or reboot) before relying on audio again.'
+            }
         }
     }
     Start-Sleep -Seconds 2
@@ -429,18 +546,23 @@ function Rebuild-Store {
     if ((Get-ExistingStores).Count -eq 0) {
         & reg.exe add $Stores[0].Reg /f | Out-Null
         $r = [RegLabel]::SetLow($Stores[0].Sub)
-        if ($r -eq 'OK') { Report OK 'Service did not recreate the store; created + Low-labeled it explicitly (the verified method).' }
-        else { Report FAIL ("Store still missing and label set failed ({0}). Re-run the default fix." -f $r) }
-    } else {
+        if ($r -ne 'OK') { Report FAIL ("Store still missing and label set failed ({0}). Re-run the default fix." -f $r) }
+        elseif ($restarted) { Report OK 'Service did not recreate the store; created + Low-labeled it explicitly (the verified method).' }
+        else { Report OK 'Created + Low-labeled the store explicitly (the audio service is not running, so it could not have recreated it).' }
+    } elseif (-not $deleted) {
+        Report WARN 'At least one store was not cleared (see above), so this is not a clean slate - check it before relying on the rebuild.'
+    } elseif ($restarted) {
         Report OK 'Store deleted and audio service restarted; store present again.'
+    } else {
+        Report WARN 'Store deleted and present again, but the audio service did not restart - see above.'
     }
-    Report INFO 'Old entries are gone (that is the point - clean slate). Set a volume in a NON-browser app, close it, reopen - it should stick.'
+    if ($deleted) { Report INFO 'Old entries are gone (that is the point - clean slate). Set a volume in a NON-browser app, close it, reopen - it should stick.' }
 }
 
 # ---- OPT-IN: remove ghost (NOTPRESENT) audio endpoints ---------------------
 function Clean-GhostEndpoints {
     Section 'Remove ghost (NOTPRESENT) audio endpoints'
-    Report INFO 'Ghosts are leftover registry entries for devices no longer present. Removing them is cosmetic (tidies the mixer/device list).'
+    Report INFO 'Ghosts are leftover registry entries for devices no longer present. Removing them mostly tidies the mixer/device list.'
     if (-not $Elevated) { Report FAIL 'Requires admin - these keys are TrustedInstaller-owned. Re-run elevated (Fix-AudioMixer.cmd).'; return }
     Initialize-RegDel
     $roots = @(
@@ -465,35 +587,58 @@ function Clean-GhostEndpoints {
     if ($targets.Count -eq 0) { Report OK 'No ghost (NOTPRESENT) endpoints found. Nothing to remove.'; return }
     Report INFO ("{0} ghost endpoint(s):" -f $targets.Count)
     foreach ($t in $targets) { Write-Host ("      [{0}] {1}  {2}" -f $t.Flow, $t.Name, $t.Guid) }
-    Report INFO 'HDMI / NVIDIA / USB / Bluetooth endpoints reappear when that output is next connected - that is normal.'
+    Report INFO 'Real devices that are merely disconnected (a Bluetooth headset that is off, an unplugged USB DAC) also show here: they come back when reconnected, but with default settings (name, enhancements, format). Preview with -CheckOnly first if you still use any of them.'
     if ($CheckOnly) { Report INFO 'CheckOnly - not removing.'; return }
     Ensure-BackupDir
     $bk = Join-Path $BackupDir ('MMDevices-Audio.' + (Stamp) + '.reg')
     & reg.exe export 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio' $bk /y | Out-Null
     # reg.exe signals failure only through its exit code and writes no file when it
     # fails. Unchecked, the [OK] below is a lie and the delete loop runs without a net.
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $bk) -or (Get-Item $bk).Length -eq 0) {
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $bk) -or (Get-Item -LiteralPath $bk).Length -eq 0) {
         Report FAIL ("Backup of MMDevices\Audio FAILED (reg.exe exit {0}) - refusing to delete anything without it." -f $LASTEXITCODE)
         return
     }
     Report OK ("Backed up MMDevices\Audio -> {0}" -f (Split-Path $bk -Leaf))
     $audiosrvWasRunning = (Get-Service Audiosrv -ErrorAction SilentlyContinue).Status -eq 'Running'
-    try { Stop-Service Audiosrv -Force -ErrorAction Stop; Stop-Service AudioEndpointBuilder -Force -ErrorAction Stop }
-    catch { Report WARN ("Could not stop audio services (continuing anyway): {0}" -f $_.Exception.Message) }
     $done = 0
-    foreach ($t in $targets) {
-        $st = (Get-ItemProperty $t.PS -Name DeviceState -ErrorAction SilentlyContinue).DeviceState
-        if ([int]$st -ne 4) { Report WARN ("skip (state changed): {0}" -f $t.Name); continue }
-        $r = [RegDel]::Delete($t.Sub)
-        if (Test-Path $t.PS) { & reg.exe delete $t.Reg /f 2>$null | Out-Null }   # fallback if an empty key remained
-        if (-not (Test-Path $t.PS)) { $done++; Report OK ("removed: [{0}] {1}" -f $t.Flow, $t.Name) }
-        else { Report WARN ("could not remove {0} ({1})" -f $t.Name, $r) }
+    $restartOk = $true
+    # From the first Stop-Service to the restart is ONE try/finally (as in Rebuild-Store):
+    # however the removals end, the services are started again before this returns.
+    try {
+        try { Stop-Service Audiosrv -Force -ErrorAction Stop; Stop-Service AudioEndpointBuilder -Force -ErrorAction Stop }
+        catch { Report WARN ("Could not stop audio services (continuing anyway): {0}" -f $_.Exception.Message) }
+        foreach ($t in $targets) {
+            $st = (Get-ItemProperty $t.PS -Name DeviceState -ErrorAction SilentlyContinue).DeviceState
+            if ([int]$st -ne 4) { Report WARN ("skip (state changed): {0}" -f $t.Name); continue }
+            $r = [RegDel]::Delete($t.Sub)
+            # Fallback if an empty key remained. The Test-Path below decides the outcome, so
+            # reg.exe's own error text is dropped - with the preference lowered for this one
+            # call: under 'Stop', Windows PowerShell 5.1 turns a REDIRECTED stderr line of a
+            # native command into a terminating error, so the bare '2>$null' this used to
+            # have ended the step right here, with both audio services still stopped.
+            if (Test-Path $t.PS) { & { $ErrorActionPreference = 'Continue'; & reg.exe delete $t.Reg /f 2>$null | Out-Null } }
+            if (-not (Test-Path $t.PS)) { $done++; Report OK ("removed: [{0}] {1}" -f $t.Flow, $t.Name) }
+            else { Report WARN ("could not remove {0} ({1})" -f $t.Name, $r) }
+        }
+    } finally {
+        # Each restart is checked. These used to run with -ErrorAction SilentlyContinue and the
+        # summary below said "audio services restarted" in every branch, so a machine left
+        # with no audio at all was told everything was fine.
+        $toStart = @('AudioEndpointBuilder')
+        if ($audiosrvWasRunning) { $toStart += 'Audiosrv' }
+        foreach ($svc in $toStart) {
+            try { Start-Service -Name $svc -ErrorAction Stop }
+            catch {
+                $restartOk = $false
+                Report FAIL ("Could not restart {0}: {1}" -f $svc, $_.Exception.Message)
+                Report INFO 'Start it from services.msc (or reboot) before relying on audio again.'
+            }
+        }
     }
-    Start-Service AudioEndpointBuilder -ErrorAction SilentlyContinue
-    if ($audiosrvWasRunning) { Start-Service Audiosrv -ErrorAction SilentlyContinue }
-    if     ($done -eq $targets.Count) { Report OK   ("Removed {0} of {1} ghost endpoint(s); audio services restarted." -f $done, $targets.Count) }
-    elseif ($done -eq 0)              { Report FAIL ("Removed NONE of {0} ghost endpoint(s) - see the lines above. Audio services restarted." -f $targets.Count) }
-    else                              { Report WARN ("Removed {0} of {1} ghost endpoint(s); the rest failed - see above. Audio services restarted." -f $done, $targets.Count) }
+    $svcNote = if ($restartOk) { 'audio services restarted' } else { 'audio services did NOT all restart - see above' }
+    if     ($done -eq $targets.Count) { Report OK   ("Removed {0} of {1} ghost endpoint(s); {2}." -f $done, $targets.Count, $svcNote) }
+    elseif ($done -eq 0)              { Report FAIL ("Removed NONE of {0} ghost endpoint(s) - see the lines above; {1}." -f $targets.Count, $svcNote) }
+    else                              { Report WARN ("Removed {0} of {1} ghost endpoint(s); the rest failed - see above; {2}." -f $done, $targets.Count, $svcNote) }
     Report INFO 'To restore, import the MMDevices-Audio backup .reg from the backups folder.'
 }
 
@@ -501,6 +646,9 @@ function Clean-GhostEndpoints {
 function Fix-Services {
     Section 'Audio services (Audiosrv, AudioEndpointBuilder)'
     foreach ($svc in 'Audiosrv','AudioEndpointBuilder') {
+        # Every failure below ends in the one catch - a missing service, WMI refusing, a denied
+        # Set-Service - so it names the service and the real error and assumes nothing. It used
+        # to call all of them "not found": "Audiosrv not found: ... Access is denied".
         try {
             $s    = Get-Service -Name $svc -ErrorAction Stop
             $mode = (Get-CimInstance Win32_Service -Filter "Name='$svc'").StartMode   # Auto/Manual/Disabled - locale-independent
@@ -513,13 +661,43 @@ function Fix-Services {
                 try { Start-Service -Name $svc; Report OK "$svc started." }
                 catch { Report WARN ("{0} is stopped and could not start: {1}" -f $svc, $_.Exception.Message) }
             } else { Report OK "$svc running." }
-        } catch { Report FAIL ("{0} not found: {1}" -f $svc, $_.Exception.Message) }
+        } catch { Report FAIL ("{0}: {1}" -f $svc, $_.Exception.Message) }
     }
 }
 
 # ---- FIX 4 / REVERT: Chromium browser launch flags -------------------------
+# Chromium keeps only the LAST value of a repeated switch (its base/command_line.h: "If a
+# switch is specified multiple times, only the last value is used"). This step used to
+# append a second --disable-features, which silently re-enabled every feature the user
+# had disabled in their own. All occurrences are merged into one switch instead, placed
+# where the last one was; only that switch is touched, so other arguments - including
+# quoted ones containing double spaces - are left exactly as they were.
+function Merge-DisableFeatures([string]$argsText, [string[]]$add, [string[]]$remove) {
+    if ($null -eq $argsText) { $argsText = '' }
+    $ms = [regex]::Matches($argsText, '(?<=^|\s)--disable-features=("?)([^"\s]*)\1')
+    $list = New-Object System.Collections.Generic.List[string]
+    foreach ($m in $ms) { foreach ($f in ($m.Groups[2].Value -split ',')) { if ($f -and -not $list.Contains($f)) { $list.Add($f) } } }
+    foreach ($f in $add) { if (-not $list.Contains($f)) { $list.Add($f) } }
+    foreach ($f in $remove) { [void]$list.Remove($f) }
+    $switch = if ($list.Count) { '--disable-features=' + ($list -join ',') } else { '' }
+    if ($ms.Count -eq 0) {
+        if (-not $switch) { return $argsText.Trim() }
+        return ($argsText.TrimEnd() + ' ' + $switch).Trim()
+    }
+    $s = $argsText
+    for ($i = $ms.Count - 1; $i -ge 0; $i--) {
+        $start = $ms[$i].Index; $len = $ms[$i].Length
+        if ($i -eq $ms.Count - 1 -and $switch) { $s = $s.Remove($start, $len).Insert($start, $switch); continue }
+        # drop this occurrence together with the whitespace that separated it
+        if ($start -gt 0 -and [char]::IsWhiteSpace($s[$start - 1])) { $start--; $len++ }
+        $s = $s.Remove($start, $len)
+    }
+    $s.Trim()
+}
+
 function Fix-Browsers {
     Section 'Chromium browser launch flags (volume memory inside the browser)'
+    if (-not (Test-PerUserAllowed 'the browser shortcut flags')) { return }
     $lnks = @(Get-Shortcuts)
     if ($lnks.Count -eq 0) { Report INFO 'No .lnk shortcuts found in the usual locations.'; return }
     $wsh = New-Object -ComObject WScript.Shell
@@ -530,22 +708,25 @@ function Fix-Browsers {
             $exe = if ($sc.TargetPath) { (Split-Path $sc.TargetPath -Leaf).ToLower() } else { '' }
             if (-not $exe -or ($BrowserExes -notcontains $exe)) { continue }
             $matched++
-            $has = $sc.Arguments -match 'AudioServiceSandbox'
+            $cur  = ([string]$sc.Arguments).Trim()
+            $want = if ($Revert) { Merge-DisableFeatures $cur @() $BrowserFeatures } else { Merge-DisableFeatures $cur $BrowserFeatures @() }
+            if ($want -ceq $cur) {
+                if (-not $Revert) { Report OK ("{0} - flags already present." -f $lnk.Name) }
+                continue
+            }
             if ($Revert) {
-                if (-not $has) { continue }
                 if ($CheckOnly) { Report INFO ("WOULD remove flags from: {0}" -f $lnk.Name); continue }
                 Ensure-BackupDir
                 Backup-Shortcut $lnk | Out-Null
-                $sc.Arguments = (($sc.Arguments -replace [regex]::Escape($BrowserFlags), '') -replace '\s+', ' ').Trim()
+                $sc.Arguments = $want
                 $sc.Save(); $touched++
                 Report OK ("Removed flags: {0}" -f $lnk.Name)
                 continue
             }
-            if ($has) { Report OK ("{0} - flags already present." -f $lnk.Name); continue }
             if ($CheckOnly) { Report INFO ("WOULD add flags to: {0} ({1})" -f $lnk.Name, $exe); continue }
             Ensure-BackupDir
             Backup-Shortcut $lnk | Out-Null
-            $sc.Arguments = ("$($sc.Arguments) $BrowserFlags").Trim()
+            $sc.Arguments = $want
             $sc.Save(); $touched++
             Report OK ("Added flags: {0} ({1})" -f $lnk.Name, $exe)
         } catch { Report WARN ("Could not process {0}: {1}" -f $lnk.Name, $_.Exception.Message) }
@@ -564,6 +745,15 @@ function Set-BtAbsoluteVolume([bool]$Disable) {
     if ($cur -eq $want) { Report OK ("Already set (DisableAbsoluteVolume = {0})." -f $want); return }
     if ($CheckOnly) { Report INFO ("WOULD set DisableAbsoluteVolume = {0} (currently {1})." -f $want, $(if ($null -eq $cur) { '<not set>' } else { $cur })); return }
     & reg.exe add $BtCtReg /v DisableAbsoluteVolume /t REG_DWORD /d $want /f | Out-Null
+    $rc = $LASTEXITCODE
+    # Confirmed by reading the value back. This used to print [OK] "written" and "a REBOOT is
+    # required" unconditionally - so when reg.exe had failed, the user rebooted for nothing.
+    $now = $null
+    if (Test-Path $BtCtKey) { $now = (Get-ItemProperty $BtCtKey -Name DisableAbsoluteVolume -ErrorAction SilentlyContinue).DisableAbsoluteVolume }
+    if ($rc -ne 0 -or $now -ne $want) {
+        Report FAIL ("Could not set DisableAbsoluteVolume = {0} (reg.exe exit {1}; the value now reads {2}), so a reboot would not change anything." -f $want, $rc, $(if ($null -eq $now) { '<not set>' } else { $now }))
+        return
+    }
     Report OK ("DisableAbsoluteVolume = {0} written." -f $want)
     Report WARN 'A REBOOT is required for the Bluetooth stack to apply this. After disabling: set the headset hardware volume near max just once, then use Windows sliders.'
 }
@@ -580,7 +770,14 @@ function Disable-Enhancements {
         if ($cur -eq 1) { Report OK ("{0}: enhancements already OFF." -f $ep.Name); continue }
         if ($CheckOnly) { Report INFO ("WOULD set enhancements OFF for: {0}" -f $ep.Name); continue }
         Ensure-BackupDir
-        & reg.exe export ("HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render\" + $ep.Guid) (Join-Path $BackupDir ('endpoint.' + $ep.Guid.Trim('{}') + '.' + (Stamp) + '.reg')) /y | Out-Null
+        $bk = Join-Path $BackupDir ('endpoint.' + $ep.Guid.Trim('{}') + '.' + (Stamp) + '.reg')
+        & reg.exe export ("HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render\" + $ep.Guid) $bk /y | Out-Null
+        # Backup first, as everywhere else in this kit. The [OK] below used to announce
+        # "backup of endpoint key saved" without ever checking that it had been.
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $bk) -or (Get-Item -LiteralPath $bk).Length -eq 0) {
+            Report FAIL ("{0}: backup of the endpoint key FAILED (reg.exe exit {1}) - left unchanged." -f $ep.Name, $LASTEXITCODE)
+            continue
+        }
         try {
             Set-ItemProperty -Path $propsPath -Name $SysFxValue -Value 1 -Type DWord
             Report OK ("{0}: enhancements set OFF (backup of endpoint key saved)." -f $ep.Name)
@@ -590,8 +787,31 @@ function Disable-Enhancements {
     Report INFO 'Note: OEM audio apps/services (Nahimic, Dolby, DTS, Waves...) may flip enhancements back on - see README to stop them.'
 }
 
+# Every step runs under $ErrorActionPreference = 'Stop'. An error nobody anticipated inside
+# one - a folder that cannot be written, a locked file, a cmdlet failing in a new way - used
+# to end the WHOLE run with a raw PowerShell error: the remaining steps were skipped and no
+# Summary said what had or had not been done. It is now a [FAIL] line naming the step, the
+# other steps still run, and the exit code says so. (Parameter names are deliberately
+# unusual: PowerShell scoping is dynamic, so the step functions can see them.)
+function Invoke-Step([string]$StepName, [scriptblock]$StepBody) {
+    try { & $StepBody }
+    catch { Report FAIL ("{0} did not finish (line {1}): {2}" -f $StepName, $_.InvocationInfo.ScriptLineNumber, $_.Exception.Message) }
+}
+
 # ---- main ------------------------------------------------------------------
 Write-Host 'Fix-AudioMixer v2 - Windows 11 per-app volume persistence' -ForegroundColor White
+
+# The valid switches are read from this script's own param() block, so the message cannot
+# drift from what is actually accepted.
+if ($Unrecognized) {
+    $validSwitches = @($MyInvocation.MyCommand.Parameters.Values | Where-Object {
+        $_.SwitchParameter -and
+        [Management.Automation.PSCmdlet]::CommonParameters -notcontains $_.Name -and
+        [Management.Automation.PSCmdlet]::OptionalCommonParameters -notcontains $_.Name
+    } | ForEach-Object { '-' + $_.Name })
+    Report FAIL ("Unknown argument(s): {0}. Valid switches: {1}." -f ($Unrecognized -join ' '), ($validSwitches -join ' '))
+    exit 2
+}
 
 # The dispatch below is one if/elseif chain, so passing two action switches would run
 # only the first and never tell the user the second was ignored. Names (not the hashes)
@@ -624,19 +844,19 @@ if (-not $Elevated -and -not $Status) {
     Report WARN 'Not running as admin - some steps will be skipped. Use Fix-AudioMixer.cmd for full effect.'
 }
 
-if     ($Status)                { Show-Status $true }
-elseif ($Revert)                { Fix-Browsers }
-elseif ($RebuildStore)          { Rebuild-Store }
-elseif ($CleanGhostEndpoints)   { Clean-GhostEndpoints }
-elseif ($DisableEnhancements)   { Disable-Enhancements }
-elseif ($DisableBtAbsoluteVolume) { Set-BtAbsoluteVolume $true }
-elseif ($EnableBtAbsoluteVolume)  { Set-BtAbsoluteVolume $false }
+if     ($Status)                  { Invoke-Step 'Status'                  { Show-Status $true } }
+elseif ($Revert)                  { Invoke-Step 'Revert browser flags'    { Fix-Browsers } }
+elseif ($RebuildStore)            { Invoke-Step 'Rebuild store'           { Rebuild-Store } }
+elseif ($CleanGhostEndpoints)     { Invoke-Step 'Clean ghost endpoints'   { Clean-GhostEndpoints } }
+elseif ($DisableEnhancements)     { Invoke-Step 'Disable enhancements'    { Disable-Enhancements } }
+elseif ($DisableBtAbsoluteVolume) { Invoke-Step 'Bluetooth absolute volume' { Set-BtAbsoluteVolume $true } }
+elseif ($EnableBtAbsoluteVolume)  { Invoke-Step 'Bluetooth absolute volume' { Set-BtAbsoluteVolume $false } }
 else {
-    Fix-BleachBit
-    Fix-Store
-    Fix-Services
-    Fix-Browsers
-    Show-Status $false
+    Invoke-Step 'BleachBit rule' { Fix-BleachBit }
+    Invoke-Step 'Volume store'   { Fix-Store }
+    Invoke-Step 'Audio services' { Fix-Services }
+    Invoke-Step 'Browser flags'  { Fix-Browsers }
+    Invoke-Step 'Status'         { Show-Status $false }
 }
 
 Section 'Summary'
