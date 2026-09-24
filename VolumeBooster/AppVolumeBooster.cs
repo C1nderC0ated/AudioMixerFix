@@ -92,6 +92,13 @@ namespace AppVolumeBoosterNs
         [PreserveSig] int UnregisterEndpointNotificationCallback(IntPtr client);
     }
 
+    [ComImport, Guid("0BD7A1BE-7A1A-44DB-8397-CC5392387B5E"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IMMDeviceCollection
+    {
+        [PreserveSig] int GetCount(out uint count);
+        [PreserveSig] int Item(uint index, out IMMDevice device);
+    }
+
     [ComImport, Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     internal interface IMMDevice
     {
@@ -340,7 +347,11 @@ namespace AppVolumeBoosterNs
                     for (int i = 0; i < 24; i += 8) Marshal.WriteInt64(pv, i, 0);
                     Marshal.WriteInt16(pv, 0, (short)65); // VT_BLOB
                     Marshal.WriteInt32(pv, 8, 12);
-                    Marshal.WriteIntPtr(pv, 16, blob);
+                    // BLOB { ULONG cbSize; BYTE* pBlobData }: the pointer follows cbSize at its
+                    // natural alignment - offset 12 in a 32-bit process, 16 in a 64-bit one.
+                    // Hard-coding 16 left pBlobData NULL in a 32-bit process (on 32-bit
+                    // Windows 10), so activation failed there.
+                    Marshal.WriteIntPtr(pv, 8 + IntPtr.Size, blob);
                     try
                     {
                         ActivateCompletionHandler handler = new ActivateCompletionHandler();
@@ -385,6 +396,68 @@ namespace AppVolumeBoosterNs
                 return id;
             }
             catch { return null; }
+        }
+
+        // Every ACTIVE render endpoint, the default one first. Process-loopback capture is
+        // not tied to an endpoint - Microsoft's Application Loopback sample says so in so
+        // many words - so an app playing on a second output is captured like any other.
+        // Ducking therefore has to cover every output as well; when it only looked at the
+        // default device, an app routed elsewhere was heard at full volume PLUS a copy
+        // multiplied by boost/DUCK.
+        public static List<IMMDevice> ActiveRenderDevices()
+        {
+            List<IMMDevice> r = new List<IMMDevice>();
+            string defId = null;
+            try { IMMDevice def = DefaultRenderDevice(); def.GetId(out defId); r.Add(def); }
+            catch { }
+            IntPtr pc;
+            if (Enumerator().EnumAudioEndpoints(K.eRender, 1 /* DEVICE_STATE_ACTIVE */, out pc) < 0 || pc == IntPtr.Zero) return r;
+            try
+            {
+                IMMDeviceCollection col = (IMMDeviceCollection)Marshal.GetObjectForIUnknown(pc);
+                uint n; if (col.GetCount(out n) < 0) return r;
+                for (uint i = 0; i < n; i++)
+                {
+                    IMMDevice dv; if (col.Item(i, out dv) < 0 || dv == null) continue;
+                    string id; dv.GetId(out id);
+                    if (id != null && id == defId) continue;
+                    r.Add(dv);
+                }
+            }
+            finally { Marshal.Release(pc); }
+            return r;
+        }
+
+        public static List<IAudioSessionManager2> ActiveSessionManagers()
+        {
+            List<IAudioSessionManager2> r = new List<IAudioSessionManager2>();
+            foreach (IMMDevice dv in ActiveRenderDevices())
+            {
+                try { r.Add(SessionManager(dv)); }
+                catch { }
+            }
+            return r;
+        }
+
+        // Every audio session on every active output.
+        public static List<IAudioSessionControl> AllRenderSessions()
+        {
+            List<IAudioSessionControl> r = new List<IAudioSessionControl>();
+            foreach (IAudioSessionManager2 m in ActiveSessionManagers())
+            {
+                try
+                {
+                    IAudioSessionEnumerator en; if (m.GetSessionEnumerator(out en) < 0) continue;
+                    int count; en.GetCount(out count);
+                    for (int i = 0; i < count; i++)
+                    {
+                        IAudioSessionControl sc; if (en.GetSession(i, out sc) != 0 || sc == null) continue;
+                        r.Add(sc);
+                    }
+                }
+                catch { }
+            }
+            return r;
         }
 
         public static IAudioClient ActivateClient(IMMDevice dev)
@@ -446,6 +519,21 @@ namespace AppVolumeBoosterNs
             }
         }
 
+        // Drops the oldest samples so at most keep remain (kept even: stereo frames).
+        // Returns how many were dropped.
+        public int TrimTo(int keep)
+        {
+            lock (gate)
+            {
+                keep -= keep % 2;
+                if (rCount <= keep) return 0;
+                int drop = rCount - keep;
+                rTail = (rTail + drop) % ring.Length;
+                rCount = keep;
+                return drop;
+            }
+        }
+
         public int Pop(float[] dst, int n)
         {
             lock (gate)
@@ -466,12 +554,39 @@ namespace AppVolumeBoosterNs
     // booster instance restores it (only lines whose boosterPid is no longer alive).
     internal static class StateFile
     {
+        // Next to the exe when that folder is writable (as documented), otherwise under
+        // %LocalAppData%\AppVolumeBooster. The fallback used to apply only if the exe's folder
+        // could not even be determined; a folder that merely was not writable (a write-
+        // protected stick, Program Files for a standard user) made every write fail inside
+        // an empty catch - crash recovery silently switched off. The choice depends only on
+        // that folder, so every instance of the same exe agrees on it.
+        static string cachedPath;
         static string PathOf()
         {
-            string dir;
+            if (cachedPath != null) return cachedPath;
+            string dir = null;
             try { dir = System.IO.Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location); }
-            catch { dir = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData); }
-            return System.IO.Path.Combine(dir, "booster-state.txt");
+            catch { }
+            if (dir == null || !CanWrite(dir))
+            {
+                dir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AppVolumeBooster");
+                try { Directory.CreateDirectory(dir); }
+                catch { }
+            }
+            cachedPath = System.IO.Path.Combine(dir, "booster-state.txt");
+            return cachedPath;
+        }
+
+        // Probes with a throwaway file that deletes itself on close - never the state file.
+        static bool CanWrite(string dir)
+        {
+            try
+            {
+                string probe = System.IO.Path.Combine(dir, "booster-state.probe." + Process.GetCurrentProcess().Id.ToString());
+                using (new FileStream(probe, FileMode.Create, FileAccess.Write, FileShare.None, 1, FileOptions.DeleteOnClose)) { }
+                return true;
+            }
+            catch { return false; }
         }
 
         static Mutex Mtx()
@@ -616,6 +731,23 @@ namespace AppVolumeBoosterNs
             });
         }
 
+        // The prior some booster recorded for this target, if any line mentions it - its
+        // own earlier line, another live instance's, or an orphan left by a crash. Read
+        // without the lock on purpose: WriteAll replaces the file atomically, so a reader
+        // sees either the old or the new version, never a torn one.
+        public static bool TryGetRecordedPrior(string targetExe, out float prior)
+        {
+            prior = 1.0f;
+            foreach (string l in ReadAll())
+            {
+                string[] parts = l.Split('|');
+                if (parts.Length != 3 || !SameTarget(parts[1], targetExe)) continue;
+                float p;
+                if (float.TryParse(parts[2], NumberStyles.Float, CultureInfo.InvariantCulture, out p)) { prior = p; return true; }
+            }
+            return false;
+        }
+
         static List<string> ReadAll()
         {
             List<string> r = new List<string>();
@@ -645,6 +777,7 @@ namespace AppVolumeBoosterNs
                 if (lines.Count == 0) return;
                 List<string> keep = new List<string>();
                 List<string[]> dead = new List<string[]>();
+                List<string> heldByLive = new List<string>();
                 foreach (string l in lines)
                 {
                     string[] parts = l.Split('|');
@@ -656,20 +789,17 @@ namespace AppVolumeBoosterNs
                         try { Process p = Process.GetProcessById(bpid); alive = Native.IsBoosterName(p.ProcessName); }
                         catch { alive = false; }
                     }
-                    if (alive) keep.Add(l); else dead.Add(parts);
+                    if (alive) { keep.Add(l); heldByLive.Add(parts[1]); } else dead.Add(parts);
                 }
                 if (dead.Count > 0)
                 {
                     bool[] resolved = new bool[dead.Count];
                     try
                     {
-                        IMMDevice dev = Native.DefaultRenderDevice();
-                        IAudioSessionManager2 mgr = Native.SessionManager(dev);
-                        IAudioSessionEnumerator en; Native.Check(mgr.GetSessionEnumerator(out en), "sessions");
-                        int count; en.GetCount(out count);
-                        for (int i = 0; i < count; i++)
+                        List<IAudioSessionControl> all = Native.AllRenderSessions();
+                        for (int i = 0; i < all.Count; i++)
                         {
-                            IAudioSessionControl sc; if (en.GetSession(i, out sc) != 0) continue;
+                            IAudioSessionControl sc = all[i];
                             IAudioSessionControl2 sc2 = (IAudioSessionControl2)sc;
                             uint spid; sc2.GetProcessId(out spid);
                             string sname = Native.ProcessNameOf(spid);
@@ -679,6 +809,15 @@ namespace AppVolumeBoosterNs
                                 if (resolved[di]) continue;
                                 string[] parts = dead[di];
                                 if (!LineMatchesSession(parts[1], spid, sname, isSys)) continue;
+                                // Sessions are matched by app NAME, so a dead line can match a
+                                // session that a LIVE booster is holding at 4% right now - this
+                                // instance or another. "Healing" that used to un-duck it while it
+                                // was still being captured: a burst at full volume plus the
+                                // boosted copy until the next re-duck. Leave the line for later;
+                                // the live booster restores that app itself when it stops.
+                                bool held = false;
+                                foreach (string hx in heldByLive) if (SameTarget(hx, parts[1])) { held = true; break; }
+                                if (held) continue;
                                 ISimpleAudioVolume v = (ISimpleAudioVolume)sc;
                                 float cur; v.GetMasterVolume(out cur);
                                 if (cur <= BoostEngine.DUCK + 0.01f)
@@ -728,15 +867,22 @@ namespace AppVolumeBoosterNs
         readonly List<SampleRing> mixRings = new List<SampleRing>();
 
         volatile bool running;
-        volatile int targetPadFrames = 2400;  // standing render queue: ~50 ms; grows on underrun
+        volatile int targetPadFrames = 2400;  // standing render queue: 50 ms; +20 ms per dropout, max 150
         Thread renThread;
         System.Threading.Timer watcher;
         IAudioClient renClient;
         AutoResetEvent renEv;
-        IAudioSessionManager2 liveMgr;
+        readonly List<IAudioSessionManager2> liveMgrs = new List<IAudioSessionManager2>();
         SessionCreatedHandler sessionNote;
         string devId;
         volatile bool sysCapOk;
+        // Set by the render thread when the output keeps failing; the watcher turns it
+        // into a normal stop (the render thread must not stop the engine itself: Stop
+        // joins that very thread).
+        volatile string fatalReason;
+        int renFailStreak;
+        const string AllAudioMutexName = "AppVolumeBooster.AllAudio";
+        Mutex allAudioMutex;                  // held for the whole of an all-audio boost
         volatile bool anyTargetGone;
         HashSet<uint> wantPidsSnapshot = new HashSet<uint>();
 
@@ -747,12 +893,24 @@ namespace AppVolumeBoosterNs
             public uint Pid;
             public string Exe;
             public string InstanceId;
+            public bool Muted;                // as found - recorded, never changed
         }
         readonly List<Ducked> ducked = new List<Ducked>();
         readonly object duckLock = new object();
 
-        public long CapSamples, RenFrames, Glitches;
+        public long CapSamples, RenFrames, Glitches, TrimmedSamples;
+        // Backlog allowed to stay in a capture ring after each render pass: 40 ms. Normal
+        // jitter is one or two 10 ms packets, so steady-state audio never reaches this.
+        const int MaxBacklogSamples = 1920 * 2;
         public volatile bool Stopped = true;
+        // Exactly one caller performs a shutdown. Stop() used to guard itself with
+        // "if (Stopped) return; Stopped = true;" - two statements, not atomic - and it is
+        // reached from the UI thread, the target-exit handler and the watcher (whose ticks
+        // can overlap). Two concurrent shutdowns raced over the process list and could throw
+        // "Collection was modified" on a thread-pool thread, which ends the process.
+        // 1 = claimed (initially: nothing to stop until StartCore resets it).
+        int stopClaim = 1;
+        readonly ManualResetEvent stopDone = new ManualResetEvent(true);
         public string StopReason = "";
         public string StartWarning = "";
         public event EventHandler StoppedEvent;
@@ -838,12 +996,15 @@ namespace AppVolumeBoosterNs
         void StartCore()
         {
             if (!Stopped) return;
+            Interlocked.Exchange(ref stopClaim, 0);
+            stopDone.Reset();
             running = true;
             Stopped = false;
             StopReason = "";
             StartWarning = "";
             anyTargetGone = false;
             sysCapOk = false;
+            ClaimExclusivity();
 
             if (!boostAll)
             {
@@ -914,15 +1075,36 @@ namespace AppVolumeBoosterNs
             }
 
             DuckPass(); // duck before the relay starts (avoids a loud overlap)
+            if (!boostAll)
+            {
+                List<string> muted = new List<string>();
+                lock (duckLock)
+                {
+                    foreach (Ducked dk in ducked)
+                    {
+                        if (!dk.Muted) continue;
+                        string nm = dk.Exe == K.SysSoundsName ? "system sounds" : dk.Exe;
+                        if (!muted.Contains(nm)) muted.Add(nm);
+                    }
+                }
+                if (muted.Count > 0)
+                    StartWarning = (StartWarning == "" ? "" : StartWarning + " ") +
+                        "Muted in the Volume Mixer, so silent until you unmute it there: " +
+                        string.Join(", ", muted.ToArray()) + ".";
+            }
             foreach (IAudioClient cap in pendingCaps)
                 FinishCapture(cap, fmt);
 
             IMMDevice dev = Native.DefaultRenderDevice();
-            liveMgr = Native.SessionManager(dev);
+            // a new session on ANY active output is ducked the moment it appears, rather
+            // than up to one watcher period later at full volume
             sessionNote = new SessionCreatedHandler();
             sessionNote.Fn = DuckOne;
-            try { Native.Check(liveMgr.RegisterSessionNotification(sessionNote), "RegisterSessionNotification"); }
-            catch { sessionNote = null; }
+            foreach (IAudioSessionManager2 m in Native.ActiveSessionManagers())
+            {
+                try { Native.Check(m.RegisterSessionNotification(sessionNote), "RegisterSessionNotification"); liveMgrs.Add(m); }
+                catch { }
+            }
 
             renClient = Native.ActivateClient(dev);
             renEv = new AutoResetEvent(false);
@@ -1002,6 +1184,18 @@ namespace AppVolumeBoosterNs
             }
         }
 
+        // With [PreserveSig] the render calls return HRESULTs instead of throwing, and the
+        // loop used to just 'continue' on any error - so a dead output (device invalidated,
+        // taken over in exclusive mode, audio service restarted) left the target ducked at
+        // 4% and silent while the window kept saying "Boosting". ~2 s of nothing but
+        // failures (the loop wakes at least every 100 ms) now ends the boost properly.
+        void NoteRenderResult(int hr)
+        {
+            if (hr >= 0) { renFailStreak = 0; return; }
+            if (++renFailStreak >= 20 && fatalReason == null)
+                fatalReason = "the audio output stopped responding (0x" + hr.ToString("X8") + ") - press Start again";
+        }
+
         void RenderLoop(IAudioRenderClient render, uint renBuf)
         {
             uint idx = 0;
@@ -1009,11 +1203,45 @@ namespace AppVolumeBoosterNs
             float[] mix = new float[renBuf * 2];
             float[] tmp = new float[renBuf * 2];
             SampleRing[] rings = mixRings.ToArray();
+            // Until real audio flows - at start, and again after a dropout - the queue is held
+            // at the target with silence, so the first audio lands behind a full queue.
+            bool flowing = false;
+            long lastWrite = 0;          // Stopwatch timestamp of the last write
+            uint queuedAtWrite = 0;      // frames queued right after it
             while (running)
             {
                 renEv.WaitOne(100);
+                // Stop() clears 'running' and then winds the capture threads down, so a pass
+                // that starts after that finds the rings empty on purpose. It used to count
+                // that as a glitch - the stray "glitches=1" at the end of many clean runs.
+                if (!running) break;
+                uint pad; int hrPad = renClient.GetCurrentPadding(out pad);
+                NoteRenderResult(hrPad);
+                if (hrPad != 0) continue;
+                // An empty queue is a dropout only if the device really ran out. It takes one
+                // 10 ms period at a time, so that is when more time has passed since the last
+                // write than was queued then, plus a period (9 ms, leaving room for timing
+                // jitter); a pass that is merely just in time finds the queue empty too, with
+                // nothing lost. A real dropout - a stall on either thread: capture keeps
+                // delivering, silence included, as long as this output runs, so it is never the
+                // target just going quiet - is counted ONCE and raises the standing queue by
+                // 20 ms ONCE. It used to be counted again for every 20 ms the queue stayed empty
+                // (one 300 ms capture stall read as 14-15 glitches and pushed latency to the
+                // 160 ms cap), and not at all when audio was waiting in the ring, which is
+                // exactly what a stall of THIS thread leaves (a 130 ms gap, 0 glitches).
+                if (flowing && pad == 0)
+                {
+                    long since = (Stopwatch.GetTimestamp() - lastWrite) * 48000 / Stopwatch.Frequency;
+                    if (since - queuedAtWrite >= 432)
+                    {
+                        flowing = false;
+                        Interlocked.Increment(ref Glitches);
+                        int np = targetPadFrames + 960;
+                        if (np > 7200) np = 7200;
+                        targetPadFrames = np;
+                    }
+                }
                 uint target = (uint)targetPadFrames;
-                uint pad; if (renClient.GetCurrentPadding(out pad) != 0) continue;
                 if (pad >= target) continue;
                 uint room = renBuf - pad;
                 uint want = target - pad; if (want > room) want = room;
@@ -1023,32 +1251,54 @@ namespace AppVolumeBoosterNs
                 int maxGot = 0;
                 for (int r = 0; r < rings.Length; r++)
                 {
+                    // Resuming after a dropout: start from the NEWEST audio. Anything older is
+                    // late already, and playing it would add its age to the latency for good.
+                    if (!flowing)
+                    {
+                        int late = rings[r].TrimTo(samples);
+                        if (late > 0) Interlocked.Add(ref TrimmedSamples, late);
+                    }
                     int n = rings[r].Pop(tmp, samples);
                     for (int i = 0; i < n; i++) mix[i] += tmp[i];
                     if (n > maxGot) maxGot = n;
                 }
-                uint gotFrames = (uint)(maxGot / 2);
-                if (gotFrames == 0)
+                // Whatever is still in a ring after the pass is capped at 40 ms. A stall of this
+                // thread used to leave its whole backlog there for good - 260 ms of extra latency
+                // after one 300 ms stall in testing; that case is now resynced above, and a
+                // shorter stall is absorbed by the top-up. What is left is slow build-up (a
+                // target on another device whose clock runs a little fast), and this caps it. A
+                // stall on the CAPTURE side cannot build a backlog: process loopback discards
+                // what it could not deliver in time.
+                for (int r = 0; r < rings.Length; r++)
                 {
-                    if (pad == 0)
-                    {
-                        IntPtr ps; if (render.GetBuffer(960, out ps) == 0)
-                        { for (int i = 0; i < 960 * 2 * 4; i += 8) Marshal.WriteInt64(ps, i, 0); render.ReleaseBuffer(960, 0); }
-                        if (Interlocked.Read(ref RenFrames) > 0)
-                        {
-                            Interlocked.Increment(ref Glitches);
-                            int np = targetPadFrames + 960;
-                            if (np > 7200) np = 7200;
-                            targetPadFrames = np;
-                        }
-                    }
-                    continue;
+                    int dropped = rings[r].TrimTo(MaxBacklogSamples);
+                    if (dropped > 0) Interlocked.Add(ref TrimmedSamples, dropped);
                 }
+                uint gotFrames = (uint)(maxGot / 2);
+                // Hold the queue at the target with silence until audio flows. Without this it
+                // only ever held what the first pass happened to find in the ring: 0-20 ms
+                // instead of the intended 50, and exactly 0 on every pass in most runs, so a
+                // hiccup of more than a few ms could be heard - while the status line said ~60 ms.
+                if (!flowing && want > gotFrames)
+                {
+                    uint silence = want - gotFrames;
+                    IntPtr ps; int hrS = render.GetBuffer(silence, out ps);
+                    NoteRenderResult(hrS);
+                    if (hrS != 0) continue;
+                    render.ReleaseBuffer(silence, K.BUF_SILENT);
+                    pad += silence;
+                    lastWrite = Stopwatch.GetTimestamp(); queuedAtWrite = pad;
+                }
+                if (gotFrames == 0) continue;
                 for (int i = 0; i < maxGot; i++) mix[i] = Native.SoftClip(mix[i]);
-                IntPtr p; if (render.GetBuffer(gotFrames, out p) != 0) continue;
+                IntPtr p; int hrB = render.GetBuffer(gotFrames, out p);
+                NoteRenderResult(hrB);
+                if (hrB != 0) continue;
                 Marshal.Copy(mix, 0, p, (int)gotFrames * 2);
                 render.ReleaseBuffer(gotFrames, 0);
                 Interlocked.Add(ref RenFrames, gotFrames);
+                lastWrite = Stopwatch.GetTimestamp(); queuedAtWrite = pad + gotFrames;
+                flowing = true;
             }
         }
 
@@ -1088,19 +1338,35 @@ namespace AppVolumeBoosterNs
                         if (d.InstanceId == inst) { known = d; break; }
                     if (known == null)
                     {
+                        string exe = isSys ? K.SysSoundsName : (sname ?? ("pid" + spid.ToString()));
                         float prior = lvl;
-                        if (prior <= DUCK + 0.005f) prior = 1.0f;
+                        // A slider at the duck level only counts as "left ducked by a booster"
+                        // when a booster actually recorded this app - then that recorded prior
+                        // is the real one. Otherwise it is the user's own quiet setting and is
+                        // kept. This used to turn ANY level at or below 4.5% into 100%, so an
+                        // app you had set to 3% came back at full volume after a boost, and
+                        // Windows then saved 100% as its remembered volume.
+                        if (prior <= DUCK + 0.005f)
+                        {
+                            float recorded;
+                            if (StateFile.TryGetRecordedPrior(exe, out recorded)) prior = recorded;
+                        }
                         known = new Ducked();
                         known.Vol = v;
                         known.Prior = prior;
                         known.Pid = spid;
-                        known.Exe = isSys ? K.SysSoundsName : (sname ?? ("pid" + spid.ToString()));
+                        known.Exe = exe;
                         known.InstanceId = inst;
+                        bool wasMuted;
+                        known.Muted = v.GetMute(out wasMuted) == 0 && wasMuted;
                         ducked.Add(known);
                         StateFile.AddOwn(known.Exe, known.Prior);
                     }
-                    bool mut; v.GetMute(out mut);
-                    if (mut) v.SetMute(false, IntPtr.Zero);
+                    // Mute is the user's decision and is never changed here. This used to
+                    // unmute every session it ducked and never recorded that it had, so
+                    // "Boost all audio" made apps you had deliberately muted audible (4% x
+                    // boost/0.04 = normal volume) and left them unmuted after Stop. A muted
+                    // target now stays silent while boosted - unmute it in the mixer.
                     if (lvl > DUCK + 0.003f || lvl < DUCK - 0.003f)
                         v.SetMasterVolume(DUCK, IntPtr.Zero);
                 }
@@ -1112,15 +1378,7 @@ namespace AppVolumeBoosterNs
         {
             try
             {
-                IMMDevice dev = Native.DefaultRenderDevice();
-                IAudioSessionManager2 mgr = Native.SessionManager(dev);
-                IAudioSessionEnumerator en; Native.Check(mgr.GetSessionEnumerator(out en), "sessions");
-                int count; en.GetCount(out count);
-                for (int i = 0; i < count; i++)
-                {
-                    IAudioSessionControl sc; if (en.GetSession(i, out sc) != 0) continue;
-                    DuckOne(sc);
-                }
+                foreach (IAudioSessionControl sc in Native.AllRenderSessions()) DuckOne(sc);
             }
             catch { }
         }
@@ -1165,6 +1423,61 @@ namespace AppVolumeBoosterNs
             }
             if (tree == null) tree = DescendantsOf(root, ParentMap());
             return tree.Contains(selfPid);
+        }
+
+        // "Boost all audio" captures everything except THIS process - which includes the
+        // boosted output of any other booster instance, so that copy was boosted a second
+        // time (and two all-audio instances would feed each other). The combination is
+        // refused in both directions: an all-audio boost holds a named mutex that makes any
+        // other boost refuse to start, and it will not start while another booster is
+        // actively playing. Called first in StartCore, before anything is ducked.
+        void ClaimExclusivity()
+        {
+            if (boostAll)
+            {
+                bool createdNew;
+                Mutex m = new Mutex(false, AllAudioMutexName, out createdNew);
+                if (!createdNew)
+                {
+                    m.Close();
+                    throw new InvalidOperationException("another booster is already boosting all audio - stop it first");
+                }
+                string other = OtherActiveBooster();
+                if (other != null)
+                {
+                    m.Close();
+                    throw new InvalidOperationException("another booster is running (" + other + "); 'Boost all audio' would capture its boosted output and boost it a second time - stop it first");
+                }
+                allAudioMutex = m;
+            }
+            else
+            {
+                Mutex m;
+                if (Mutex.TryOpenExisting(AllAudioMutexName, out m))
+                {
+                    m.Close();
+                    throw new InvalidOperationException("another booster is boosting all audio, which would capture this boost's output and boost it again - stop that one first");
+                }
+            }
+        }
+
+        string OtherActiveBooster()
+        {
+            foreach (IAudioSessionControl sc in Native.AllRenderSessions())
+            {
+                try
+                {
+                    IAudioSessionControl2 sc2 = (IAudioSessionControl2)sc;
+                    uint spid; sc2.GetProcessId(out spid);
+                    if (spid == selfPid) continue;
+                    int st; sc2.GetState(out st);
+                    if (st != K.StateActive) continue;
+                    string n = Native.ProcessNameOf(spid);
+                    if (Native.IsBoosterName(n)) return n + " pid " + spid.ToString();
+                }
+                catch { }
+            }
+            return null;
         }
 
         static Dictionary<uint, uint> ParentMap()
@@ -1231,6 +1544,8 @@ namespace AppVolumeBoosterNs
             if (!running) return;
             try
             {
+                string fatal = fatalReason;
+                if (fatal != null) { StopBecause(fatal); return; }
                 string cur = Native.DefaultRenderDeviceId();
                 if (cur != null && devId != null && cur != devId)
                 {
@@ -1289,36 +1604,54 @@ namespace AppVolumeBoosterNs
 
         void StopBecause(string reason)
         {
-            if (Stopped) return;
+            // Another stop already owns the shutdown - it restores everything and reports.
+            if (Interlocked.CompareExchange(ref stopClaim, 1, 0) != 0) return;
             StopReason = reason;
-            Stop(true);
+            StopClaimed(true);
             EventHandler h = StoppedEvent;
             if (h != null) h(this, EventArgs.Empty);
         }
 
         public void Stop(bool restoreVolumes)
         {
-            if (Stopped) return;
-            Stopped = true;
-            running = false;
-            try { if (watcher != null) watcher.Dispose(); } catch { }
-            foreach (Thread t in capThreads)
-                try { t.Join(500); } catch { }
-            try { if (renThread != null) renThread.Join(500); } catch { }
-            try { System.Runtime.GCSettings.LatencyMode = System.Runtime.GCLatencyMode.Interactive; } catch { }
-            Native.RunMta(delegate() { StopComCore(restoreVolumes); });
+            if (Interlocked.CompareExchange(ref stopClaim, 1, 0) != 0)
+            {
+                // Somebody else is already stopping (target closed, output changed, the
+                // render thread gave up). WAIT for them instead of returning at once: closing
+                // the window on an early return used to end the process while that other
+                // stop was still restoring the sliders on a background thread.
+                stopDone.WaitOne(5000);
+                return;
+            }
+            StopClaimed(restoreVolumes);
+        }
+
+        void StopClaimed(bool restoreVolumes)
+        {
+            try
+            {
+                Stopped = true;
+                running = false;
+                try { if (watcher != null) watcher.Dispose(); } catch { }
+                foreach (Thread t in capThreads)
+                    try { t.Join(500); } catch { }
+                try { if (renThread != null) renThread.Join(500); } catch { }
+                try { System.Runtime.GCSettings.LatencyMode = System.Runtime.GCLatencyMode.Interactive; } catch { }
+                Native.RunMta(delegate() { StopComCore(restoreVolumes); });
+            }
+            finally { stopDone.Set(); }
         }
 
         void StopComCore(bool restoreVolumes)
         {
-            try
+            foreach (IAudioSessionManager2 m in liveMgrs)
             {
-                if (liveMgr != null && sessionNote != null)
-                    liveMgr.UnregisterSessionNotification(sessionNote);
+                try { if (sessionNote != null) m.UnregisterSessionNotification(sessionNote); }
+                catch { }
             }
-            catch { }
+            liveMgrs.Clear();
             sessionNote = null;
-            liveMgr = null;
+            if (allAudioMutex != null) { try { allAudioMutex.Close(); } catch { } allAudioMutex = null; }
             foreach (IAudioClient cap in capClients)
                 try { cap.Stop(); } catch { }
             try { if (renClient != null) renClient.Stop(); } catch { }
@@ -1690,16 +2023,13 @@ namespace AppVolumeBoosterNs
             try
             {
                 uint self = (uint)Process.GetCurrentProcess().Id;
-                IMMDevice dev = Native.DefaultRenderDevice();
-                IAudioSessionManager2 mgr = Native.SessionManager(dev);
-                IAudioSessionEnumerator en; Native.Check(mgr.GetSessionEnumerator(out en), "sessions");
-                int count; en.GetCount(out count);
+                List<IAudioSessionControl> all = Native.AllRenderSessions();
                 List<uint> pids = new List<uint>();
                 Dictionary<uint, string> names = new Dictionary<uint, string>();
                 Dictionary<uint, bool> playing = new Dictionary<uint, bool>();
-                for (int i = 0; i < count; i++)
+                for (int i = 0; i < all.Count; i++)
                 {
-                    IAudioSessionControl sc; if (en.GetSession(i, out sc) != 0) continue;
+                    IAudioSessionControl sc = all[i];
                     IAudioSessionControl2 sc2 = (IAudioSessionControl2)sc;
                     uint pid; sc2.GetProcessId(out pid);
                     int st; sc2.GetState(out st);
@@ -1751,14 +2081,21 @@ namespace AppVolumeBoosterNs
 
         void ToggleBoost()
         {
-            if (engine != null && !engine.Stopped)
+            // Any engine at all means the button currently reads "Stop boost", so this click
+            // is a stop - even when the engine already stopped itself (target closed, output
+            // changed) and its notification is still queued. This used to test !Stopped, so
+            // a click in that window STARTED a new boost, which the queued notification then
+            // orphaned by nulling the field: a boost the window could no longer stop, left
+            // running (and its targets ducked) after the window closed.
+            if (engine != null)
             {
+                string why = (engine.Stopped && engine.StopReason != "") ? engine.StopReason : null;
                 engine.Stop(true);
                 engine = null;
                 startBtn.Text = "Start boost";
                 StyleActionButton(false);
                 SetBusy(false);
-                status.Text = "Stopped - mixer volume restored.";
+                status.Text = why != null ? "Stopped: " + why : "Stopped - mixer volume restored.";
                 return;
             }
             List<uint> pids = CheckedPids();
@@ -1771,16 +2108,20 @@ namespace AppVolumeBoosterNs
             }
             try
             {
-                engine = new BoostEngine(pids, slider.Value, all, sys);
-                engine.StoppedEvent += delegate
+                BoostEngine mine = new BoostEngine(pids, slider.Value, all, sys);
+                engine = mine;
+                mine.StoppedEvent += delegate
                 {
                     try
                     {
                         BeginInvoke((MethodInvoker)delegate
                         {
+                            // Only the engine that is still current may reset the UI. A stale
+                            // notification from an earlier engine must never touch a newer one.
+                            if (!object.ReferenceEquals(engine, mine)) return;
                             startBtn.Text = "Start boost";
                             StyleActionButton(false);
-                            status.Text = "Stopped: " + engine.StopReason;
+                            status.Text = "Stopped: " + mine.StopReason;
                             engine = null;
                             SetBusy(false);
                             FillSessions();
@@ -1788,12 +2129,12 @@ namespace AppVolumeBoosterNs
                     }
                     catch { }
                 };
-                engine.Start();
+                mine.Start();
                 startBtn.Text = "Stop boost";
                 StyleActionButton(true);
                 SetBusy(true);
-                string warn = engine.StartWarning;
-                status.Text = "Boosting " + engine.TargetSummary + " at " + slider.Value + "% (latency ~" + engine.LatencyMs + " ms)."
+                string warn = mine.StartWarning;
+                status.Text = "Boosting " + mine.TargetSummary + " at " + slider.Value + "% (latency ~" + mine.LatencyMs + " ms)."
                     + (warn != "" ? " " + warn : "");
             }
             catch (Exception ex)
@@ -1843,6 +2184,16 @@ namespace AppVolumeBoosterNs
             return v;
         }
 
+        // A log write must never throw: it used to happen inside the catch block while
+        // reporting the real error, so an unwritable --log turned any failure into an
+        // unhandled exception - a crash dialog in the middle of a script.
+        static bool TryLog(string path, string text)
+        {
+            if (path == null) return false;
+            try { File.WriteAllText(path, text); return true; }
+            catch { return false; }
+        }
+
         static int CliMain(string[] args)
         {
             List<uint> pids = new List<uint>();
@@ -1856,6 +2207,10 @@ namespace AppVolumeBoosterNs
             for (int i = 0; i + 1 < args.Length; i++)
                 if (string.Equals(args[i], "--log", StringComparison.OrdinalIgnoreCase)) log = args[i + 1];
 
+            // Exit 3 = the log cannot be written - checked before anything is started, since
+            // no result could be reported afterwards.
+            if (log != null && !TryLog(log, "")) return 3;
+
             try
             {
                 // Parsing lives inside the try so a malformed number is reported rather
@@ -1867,7 +2222,15 @@ namespace AppVolumeBoosterNs
                     if (a == "--pid") pids.Add(uint.Parse(NextValue(a, args, ref i), CultureInfo.InvariantCulture));
                     else if (a == "--name") names.Add(NextValue(a, args, ref i));
                     else if (a == "--boost") boostPct = int.Parse(NextValue(a, args, ref i), CultureInfo.InvariantCulture);
-                    else if (a == "--seconds") seconds = double.Parse(NextValue(a, args, ref i), CultureInfo.InvariantCulture);
+                    else if (a == "--seconds")
+                    {
+                        seconds = double.Parse(NextValue(a, args, ref i), CultureInfo.InvariantCulture);
+                        // Beyond ~24.8 days (seconds * 1000) overflows an int, the wait below then
+                        // threw AFTER the engine had started - and the process exited with the
+                        // targets still ducked. Negative or NaN values waited forever.
+                        if (double.IsNaN(seconds) || double.IsInfinity(seconds) || seconds < 0 || seconds > int.MaxValue / 1000.0)
+                            throw new ArgumentException("--seconds must be between 0 and " + (int.MaxValue / 1000).ToString() + " (0 = until the target closes)");
+                    }
                     else if (a == "--padms") padMs = int.Parse(NextValue(a, args, ref i), CultureInfo.InvariantCulture);
                     else if (a == "--log") log = NextValue(a, args, ref i);
                     else if (a == "--all") all = true;
@@ -1894,19 +2257,25 @@ namespace AppVolumeBoosterNs
                 ManualResetEvent stopped = new ManualResetEvent(false);
                 eng.StoppedEvent += delegate { stopped.Set(); };
                 eng.Start();
-                if (seconds > 0) stopped.WaitOne((int)(seconds * 1000));
-                else stopped.WaitOne();
-                string why = eng.StopReason;
-                eng.Stop(true);
+                string why;
+                try
+                {
+                    if (seconds > 0) stopped.WaitOne((int)(seconds * 1000));
+                    else stopped.WaitOne();
+                    why = eng.StopReason;
+                }
+                finally { eng.Stop(true); }   // on every path: never exit with targets ducked
                 string line = string.Format(CultureInfo.InvariantCulture,
-                    "ok capSamples={0} renFrames={1} glitches={2} boost={3} latencyMs={4} targets={5} stopReason={6}",
-                    eng.CapSamples, eng.RenFrames, eng.Glitches, eng.BoostPercent, eng.LatencyMs, eng.TargetSummary, why == "" ? "timer" : why);
-                if (log != null) File.WriteAllText(log, line + "\r\n");
+                    "ok capSamples={0} renFrames={1} glitches={2} trimmedMs={8} boost={3} latencyMs={4} targets={5} stopReason={6}{7}",
+                    eng.CapSamples, eng.RenFrames, eng.Glitches, eng.BoostPercent, eng.LatencyMs, eng.TargetSummary, why == "" ? "timer" : why,
+                    eng.StartWarning == "" ? "" : " warning=" + eng.StartWarning,
+                    Interlocked.Read(ref eng.TrimmedSamples) / 96);
+                TryLog(log, line + "\r\n");
                 return 0;
             }
             catch (Exception ex)
             {
-                if (log != null) File.WriteAllText(log, "ERROR " + ex + "\r\n");
+                TryLog(log, "ERROR " + ex + "\r\n");
                 return 1;
             }
         }
