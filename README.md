@@ -20,7 +20,7 @@ Afterward, check the table of symptoms below.
 | Symptom | Probable cause | Action to take |
 |---|---|---|
 | All applications reset to 100% volume after a restart or reopening | The store key was deleted (by a cleaner) or has an incorrect integrity label | Run the script with its default settings; for the worst case, use `-RebuildStore` |
-| Only your **browser** does not remember its volume setting | Chromium's audio sandbox (affects Chrome, Edge, Thorium, Brave, Vivaldi, Opera; Firefox is not affected) | The default script adds launch flags to browser shortcuts |
+| Only your **browser** does not remember its volume setting | Chromium's audio sandbox (affects Chrome, Edge, Thorium, Brave, Vivaldi, Opera, Opera GX and Yandex Browser; Firefox is not affected) | The default script adds launch flags to browser shortcuts |
 | Volume behaves erratically with **Bluetooth** (slider jumps back, large volume changes, buttons conflict with the slider) | Bluetooth absolute volume is active | To confirm, check if the main volume slider misbehaves on the Bluetooth device. Then, run `-DisableBtAbsoluteVolume` and restart your computer. |
 | Volumes reset randomly when an audio device restarts; an OEM effect app is installed (such as Nahimic, Dolby, DTS, Waves, or Realtek Console) | Audio enhancements or third-party APOs are rebuilding the endpoint | Use `-DisableEnhancements` and manually stop the OEM service (see instructions below) |
 | Volumes "reset" after changing the output device | This is by design: volumes are stored for each specific combination of device and application | Set volumes once for every device you use |
@@ -49,6 +49,7 @@ The only reliable solution is to launch them with these flags:
 --disable-features=AudioServiceSandbox,AudioServiceOutOfProcess
 ```
 
+If a shortcut already carries its own `--disable-features=...`, these two are merged into it rather than added as a second switch: Chromium honours only the last `--disable-features` on a command line, so a second one would silently undo yours. `-Revert` removes just these two. 
 This involves a trade-off: audio-process sandboxing becomes slightly weaker. 
 An alternative is to use an in-browser volume extension and skip using these flags.
 
@@ -77,25 +78,28 @@ The `-Status` command verifies if this component is installed.
 
 ## The script
 
-You can run this script multiple times without issues. It saves everything it changes to a `backups\` folder located next to the script (wherever you place the kit). 
+You can run this script multiple times without issues. It saves everything it changes to a `backups\` folder located next to the script (wherever you place the kit). If that folder cannot be written to (for example, the kit is on a write-protected USB stick or a read-only share), the backups go to `%LOCALAPPDATA%\AudioMixerFix\backups` instead, and the script tells you so. If no backup can be written anywhere, the steps that need one are reported as `[FAIL]` and change nothing. 
+An unexpected error inside one step does not stop the whole run: it shows up as a `[FAIL]` line naming that step, and the remaining steps and the Summary still run. 
 It works correctly regardless of your system's language settings (for example, on Cyrillic Windows) because it uses SIDs and service names and never interprets localized output.
 
 | Command | What it does |
 |---|---|
-| `Fix-AudioMixer.cmd` (double-click) | This file automatically elevates its permissions and applies the main fixes. The elevated window waits for a keypress before closing, so you can actually read the results, and if you decline the administrator prompt it tells you nothing was changed instead of closing silently. |
+| `Fix-AudioMixer.cmd` (double-click) | This file automatically elevates its permissions and applies the main fixes. The elevated window waits for a keypress before closing, so you can actually read the results, and if you decline the administrator prompt it tells you nothing was changed instead of closing silently. The same goes for a copy it cannot relaunch elevated - one on a mapped network drive, or in a folder whose path holds a `%NAME%` pair that Windows would expand as a variable. |
 | `Check-Store.bat` (double-click) | This provides a quick visual check. It lists applications with saved volumes in both store variants and gives a clear result. No administrator rights are required. |
 | `.\Fix-AudioMixer.ps1` | This performs the main fixes: it disables the cleaner rule, manages the store and its label, adjusts services, and sets browser flags. |
 | `.\Fix-AudioMixer.ps1 -CheckOnly` | This reports what any mode *would* do without making any changes. |
 | `.\Fix-AudioMixer.ps1 -Status` | This offers a complete diagnosis, including store variations, entries, labels, Bluetooth status, APOs for each output, device and driver information, Fast Startup status, and the IE-mode component. |
 | `.\Fix-AudioMixer.ps1 -Revert` | This command removes any browser flags that the script added. |
-| `.\Fix-AudioMixer.ps1 -RebuildStore` | **This is an optional action.** It backs up and deletes the store, then restarts the audio service so Windows can rebuild it naturally. If Windows does not rebuild it (as was the case on my machine's build), the script explicitly recreates and labels it. **Warning: Any running applications will have their volume reset to 100%, and all saved entries will be cleared (starting fresh).** |
-| `.\Fix-AudioMixer.ps1 -CleanGhostEndpoints` | **This is an optional action.** It removes `NOTPRESENT` "ghost" render and capture endpoints left by old drivers, HDMI/NVIDIA outputs, and virtual devices. It takes ownership of these keys (which are owned by TrustedInstaller), first backs up `MMDevices\Audio`, and then restarts audio. This is purely for appearance; entries for actual hardware will reappear when reconnected. |
+| `.\Fix-AudioMixer.ps1 -RebuildStore` | **This is an optional action.** It backs up the store - and stops, changing nothing, if that backup fails - then deletes it, then restarts the audio service (always, even if something in between fails) so Windows can rebuild it naturally. If Windows does not rebuild it (as was the case on my machine's build), the script explicitly recreates and labels it. **Warning: Any running applications will have their volume reset to 100%, and all saved entries will be cleared (starting fresh).** |
+| `.\Fix-AudioMixer.ps1 -CleanGhostEndpoints` | **This is an optional action.** It removes `NOTPRESENT` "ghost" render and capture endpoints left by old drivers, HDMI/NVIDIA outputs, and virtual devices. It takes ownership of these keys (which are owned by TrustedInstaller), first backs up `MMDevices\Audio`, and then restarts audio - always, even if a removal fails part-way. It is mostly cosmetic, with one catch: `NOTPRESENT` also covers real devices that are simply disconnected (a Bluetooth headset that is switched off, an unplugged USB DAC). Those come back when reconnected, but with default settings - their custom name, enhancement settings and default format are gone. Preview the list first with `-CleanGhostEndpoints -CheckOnly`. |
 | `.\Fix-AudioMixer.ps1 -DisableEnhancements` | **This is an optional action.** It turns off "Audio enhancements" for every active output. This sets the documented `Disable_SysFx` value to 1, and the endpoint key is backed up beforehand. A reboot is needed afterwards. |
 | `.\Fix-AudioMixer.ps1 -DisableBtAbsoluteVolume` / `-EnableBtAbsoluteVolume` | **This is an optional action.** Use this to change the Bluetooth absolute volume setting (`HKLM\SYSTEM\CurrentControlSet\Control\Bluetooth\Audio\AVRCP\CT\DisableAbsoluteVolume`). **A reboot is required.** This change affects all Bluetooth audio devices globally. |
 
 The `-CheckOnly` command can be combined with the optional switches. For example, you can use `.\Fix-AudioMixer.ps1 -DisableEnhancements -CheckOnly`. 
 Only one action switch runs per invocation. Passing two that contradict each other (say `-DisableBtAbsoluteVolume -EnableBtAbsoluteVolume`) is refused by name rather than silently running whichever comes first. 
-Exit codes: **0** nothing failed, **1** at least one `[FAIL]` line, **2** the command line itself was wrong.
+Exit codes: **0** nothing failed, **1** at least one `[FAIL]` line, **2** the command line itself was wrong - an unknown or misspelled switch (named in the message, with the list of valid ones), or two action switches at once. 
+On a **standard (non-admin) account**, approving the prompt with an administrator's password runs the script as *that* administrator. The per-user steps - volume store, BleachBit rule, browser shortcuts - are then skipped with a `[FAIL]` instead of being applied to the administrator's profile; run `.\Fix-AudioMixer.ps1` from an ordinary PowerShell window for those (they need no admin rights). 
+Run the kit from a local drive: an elevated window cannot see a drive letter mapped in your session, so `Fix-AudioMixer.cmd` refuses to start from a mapped network drive and says so. If BleachBit is open, close it first - while it runs it can save its settings over the fix, so the script leaves its config alone and tells you.
 
 ---
 
@@ -113,7 +117,7 @@ Go to Settings → System → Sound → Click *All sound devices* → For each o
 For the older method: Press `Win+R` → Type `mmsys.cpl` → Select the device → Click Properties → Go to the Enhancements tab → Check "Disable all enhancements." 
 (Note: this tab might not appear with the Realtek UAD driver; use the Settings app instead.)
 
-**Clean Up Old or Ghost Output Devices** (This is cosmetic and reduces clutter in your device list).
+**Clean Up Old or Ghost Output Devices** (Mostly cosmetic - it reduces clutter in your device list; see the caveat about disconnected devices in the command table above).
 The simplest way is to run **`-CleanGhostEndpoints`**. This tool backs up `MMDevices\Audio`, takes ownership of the `NOTPRESENT` registry keys, and then deletes them. 
 These ghost devices are *only found in the registry*; they usually do not show up as removable Plug and Play devices. 
 Because of this, `pnputil /enum-devices /disconnected` often shows nothing, and Device Manager's "show hidden devices" will not reveal them. The script removes them by clearing their registry keys. 
@@ -133,7 +137,7 @@ After disabling, set the headset's own hardware volume close to maximum once; it
 
 ## How to Check if It's Working
 
-- **`Check-Store.bat`** provides a quick visual check. Double-click it. If an app appears with a green "verdict," Windows is storing its volume settings. (An app only shows up after you adjust its volume and then close it.)
+- **`Check-Store.bat`** provides a quick visual check. Double-click it. Every app it lists is having its volume saved. A browser or Microsoft Store app *missing* from the list after you set its volume and closed it means the store's security label is wrong (ordinary apps still save fine then) - run `Fix-AudioMixer.cmd`. (An app only shows up after you adjust its volume and then close it.)
 - For a more detailed look, run `.\Fix-AudioMixer.ps1 -Status`. This shows the same list of apps, along with the integrity label `S:(ML;OICI;NW;;;LW)`, Bluetooth settings, Audio Processing Objects (APOs), and the status of various devices.
 - To test it, set a media player's volume to around 30%. Close the player completely, then open it again. The volume should still be at 30%.
 - Volume settings save when you close an application, and this applies to each output device separately. Browsers require specific flags to save their settings, while Discord handles some of its volume internally, making it an unreliable test app.
@@ -157,7 +161,7 @@ This script will detect and create any missing components, such as the store, la
 
 - To revert browser flags, use `-Revert`. For Bluetooth, use `-EnableBtAbsoluteVolume` and then restart your computer.
 - For enhancements, either reset the endpoint's `{1da5d803-d492-4edd-8c23-e0c0ffee7f0e},5` value to 0 (or delete it), or use the toggle in Settings. Timestamped `.reg` backups of all affected endpoints are in the `backups\` folder.
-- All other changes have timestamped copies in `backups\`, including `bleachbit.ini.*`, `PropertyStore.*.reg`, `*.lnk.*.bak`, and `endpoint.*.reg`. 
+- All other changes have timestamped copies in `backups\` (or in `%LOCALAPPDATA%\AudioMixerFix\backups`, if the script said it used that folder), including `bleachbit.ini.*`, `PropertyStore.*.reg`, `*.lnk.*.bak`, and `endpoint.*.reg`. 
 - Shortcut backups are named `<name>.lnk.<hash>.<timestamp>.bak`. The hash identifies which folder the shortcut came from: Desktop, the Start Menu and the taskbar pin folder routinely hold shortcuts with the *same* file name, so the name alone cannot tell them apart. `backups\shortcut-sources.txt` maps every backup file back to the exact path it was copied from.
 
 ## Primary Information Sources
@@ -173,3 +177,13 @@ This utility **will not** be actively maintained, unless it becomes popular for 
 
 `VolumeBooster\AppVolumeBooster.exe` (optional, added 2026-08-23, multi-app update 2026-09-20) boosts one or more chosen applications past 100% - up to 500% - and can optionally include Windows system sounds or all audio on the default device. No drivers, no admin rights, nothing installed; if you never run it, it changes nothing. 
 Full documentation, including how it interacts with the volume memory this kit protects, is in **VOLUME-BOOSTER.md**.
+
+## Tests
+
+The `tests` folder holds the checks that keep the kit from bringing back a bug it has already had. You do not need it to use the kit. To run them, open PowerShell in the kit folder:
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File tests\Run-Tests.ps1
+```
+
+That takes about two and a half minutes. Add `-Audio` to include the booster's tests, which take about five more minutes and play a faint tone from a hidden test process. The tests change nothing on the machine; **tests\README.md** says exactly what they touch and what each one guards.
