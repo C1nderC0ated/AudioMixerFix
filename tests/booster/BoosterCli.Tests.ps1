@@ -3,8 +3,9 @@ trap { Write-Host ('    FAIL  harness error: ' + $_); $global:AnyFail = $true; c
 . "$PSScriptRoot\..\lib\AudioRig.ps1"
 # The booster's command line: a --seconds value it cannot honour is refused BEFORE the
 # boost starts (beyond ~24.8 days the wait overflowed after the engine had started and the
-# process exited with its target ducked; negative or NaN waited forever), and a --log it
-# cannot write is exit code 3 up front instead of a crash in the middle of the run.
+# process exited with its target ducked; negative or NaN waited forever), a --log it
+# cannot write is exit code 3 up front instead of a crash in the middle of the run, and
+# "--log" followed by another flag does not create a file named after that flag.
 Build-Rig
 $player = Start-Player 60
 $orig = Probe get $player.Id
@@ -26,6 +27,13 @@ try {
     Assert ($p.ExitCode -eq 3) 'exit code 3 (log not writable), not a crash'
     Assert (-not (Get-Process WerFault -ErrorAction SilentlyContinue | Where-Object { $_.StartTime -gt (Get-Date).AddSeconds(-20) })) 'no Windows Error Reporting dialog'
     Assert (Test-Restored $player $orig) 'nothing left ducked'
+    Write-Host '  -- "--log" followed by another flag --'
+    $cwd = Join-Path $Rig.Dir 'cwd'
+    New-Item -ItemType Directory -Force -Path $cwd | Out-Null
+    $p = Start-Process (Join-Path $Rig.Dir 'AppVolumeBooster.exe') -ArgumentList '--log', '--boost', '200' -WorkingDirectory $cwd -PassThru -Wait -WindowStyle Hidden
+    Write-Host ('     exit {0}; files in the working folder: {1}' -f $p.ExitCode, (@(Get-ChildItem -LiteralPath $cwd -Force | ForEach-Object { $_.Name }) -join ', '))
+    Assert ($p.ExitCode -eq 1) 'refused (exit 1)'
+    Assert (-not (Test-Path -LiteralPath (Join-Path $cwd '--boost'))) 'no file named "--boost" was created (the pre-scan used to take the next flag as the log path)'
     Write-Host '  -- a normal run --'
     $r = Invoke-Booster @('--pid', $player.Id, '--boost', '100', '--seconds', '2')
     Assert ($r.Code -eq 0 -and $r.Log -match '^ok ') 'succeeds'

@@ -9,6 +9,10 @@
 #   * The player's mixer volume and mute are read at start and put back BEFORE it exits:
 #     Windows saves an app's mixer state when it closes, so a player left at 4% or muted
 #     would change what every PowerShell window starts at.
+#   * The booster keeps its crash note in %LOCALAPPDATA%\AppVolumeBooster\booster-state.txt,
+#     the user's real one. It is read when this file is loaded and put back exactly as it
+#     was by Complete-Test, so no test can leave a line there for a later self-heal to act
+#     on. (Do not run the audio tests while you are boosting something yourself.)
 #
 #   Build-Rig [<source>]      compile the booster (warning level 4) and the probe from the
 #                             source under test into a fresh scratch folder, $Rig.Dir
@@ -24,6 +28,16 @@ $Rig = @{ Src = (Get-KitFile 'VolumeBooster\AppVolumeBooster.cs'); Dir = $null; 
 $script:Csc = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 if (-not (Test-Path -LiteralPath $script:Csc)) { $script:Csc = "$env:WINDIR\Microsoft.NET\Framework\v4.0.30319\csc.exe" }
 $script:CscRefs = @('/r:System.Windows.Forms.dll', '/r:System.Drawing.dll', '/r:System.Management.dll')
+
+$script:NoteDir = Join-Path $env:LOCALAPPDATA 'AppVolumeBooster'
+$script:NoteFile = Join-Path $script:NoteDir 'booster-state.txt'
+$script:NoteDirExisted = Test-Path -LiteralPath $script:NoteDir
+$script:NoteBefore = if (Test-Path -LiteralPath $script:NoteFile) { [IO.File]::ReadAllText($script:NoteFile) } else { $null }
+$script:Cleanups.Add({
+    if ($null -ne $script:NoteBefore) { [IO.File]::WriteAllText($script:NoteFile, $script:NoteBefore) }
+    elseif (Test-Path -LiteralPath $script:NoteFile) { Remove-Item -LiteralPath $script:NoteFile -Force }
+    if (-not $script:NoteDirExisted -and (Test-Path -LiteralPath $script:NoteDir) -and -not (Get-ChildItem -LiteralPath $script:NoteDir -Force)) { Remove-Item -LiteralPath $script:NoteDir }
+})
 
 function New-Build([string]$Source, [string]$Out, [string]$Main = '', [switch]$Console, [string]$Platform = '', [string[]]$Extra = @(), [switch]$Warn4) {
     New-Item -ItemType Directory -Force -Path (Split-Path $Out) | Out-Null
@@ -67,8 +81,9 @@ function Start-Player([int]$seconds = 30) {
     }
     $cmd = "`$p = New-Object Media.SoundPlayer '$($Rig.Wav)'; `$p.PlayLooping(); Start-Sleep -Seconds $seconds; `$p.Stop()"
     $proc = Start-Process powershell -ArgumentList '-NoProfile', '-Command', $cmd -PassThru -WindowStyle Hidden
-    # a child PowerShell needs a couple of seconds just to start: poll for its session
-    $deadline = (Get-Date).AddSeconds(12)
+    # a child PowerShell needs a couple of seconds just to start - and well over ten on a
+    # busy machine: poll for its session
+    $deadline = (Get-Date).AddSeconds(45)
     while ((Get-Date) -lt $deadline) {
         if ($proc.HasExited) { throw "player exited early (code $($proc.ExitCode))" }
         if ((Probe get $proc.Id) -match 'vol=') { return $proc }

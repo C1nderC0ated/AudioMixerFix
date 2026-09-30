@@ -30,6 +30,15 @@ rem it knows - measured: a folder "a%%OS%%b" became "aWindows_NTb" and nothing r
 rem path with such a pair is first put to cmd itself (the same expansion, compared with the
 rem raw path read back through delayed expansion) and refused with an explanation if it
 rem would change. A path without a pair skips the check; a lone percent sign is harmless.
+rem For that comparison the carets of the path are doubled only when it also holds an
+rem exclamation mark: cmd takes carets out of a quoted operand only then. Doubled in every
+rem case, a folder such as "a^b%%X%%c" was refused although nothing in it would expand.
+
+rem Double-clicked inside a ZIP archive, Explorer extracts this one file to a temporary
+rem folder and runs it there - without the script. That used to go through the
+rem administrator prompt and end with PowerShell's own error text and "Review the [FAIL]
+rem lines above". Checked first, so it is said before anything is asked for.
+if not exist "%~dp0Fix-AudioMixer.ps1" goto :nops1
 
 if /i "%~1"=="--elevated" goto :elevated
 
@@ -44,7 +53,7 @@ rem call (no extra start-up): exit 2 = network drive. A UNC path (\\server\share
 rem drive letter, makes DriveInfo throw, and is allowed through - elevation can reach it.
 set "SELFCMD=%~f0"
 set "SELFDRIVE=%~d0"
-powershell -NoProfile -Command "try { if ([IO.DriveInfo]::new($env:SELFDRIVE).DriveType -eq 'Network') { exit 2 } } catch {}; if ($env:SELFCMD -match '%%[^%%]+%%') { try { $q = $env:SELFCMD.Replace('^', '^^').Replace('!', '^!'); $p = Start-Process -FilePath $env:ComSpec -ArgumentList '/d', '/v:on', '/s', '/c', ('\"if not \"' + $q + '\"==\"!SELFCMD!\" exit 3\"') -Wait -PassThru -WindowStyle Hidden; if ($p.ExitCode -ne 0) { exit 3 } } catch { exit 3 } }; try { Start-Process -Verb RunAs -FilePath $env:ComSpec -ArgumentList '/s', '/c', ('\"\"' + $env:SELFCMD + '\" --elevated\"') -ErrorAction Stop } catch { exit 1 }"
+powershell -NoProfile -Command "try { if ([IO.DriveInfo]::new($env:SELFDRIVE).DriveType -eq 'Network') { exit 2 } } catch {}; if ($env:SELFCMD -match '%%[^%%]+%%') { try { $q = $env:SELFCMD; if ($q.Contains('!')) { $q = $q.Replace('^', '^^').Replace('!', '^!') }; $p = Start-Process -FilePath $env:ComSpec -ArgumentList '/d', '/v:on', '/s', '/c', ('\"if not \"' + $q + '\"==\"!SELFCMD!\" exit 3\"') -Wait -PassThru -WindowStyle Hidden; if ($p.ExitCode -ne 0) { exit 3 } } catch { exit 3 } }; try { Start-Process -Verb RunAs -FilePath $env:ComSpec -ArgumentList '/s', '/c', ('\"\"' + $env:SELFCMD + '\" --elevated\"') -ErrorAction Stop } catch { exit 1 }"
 set "PSRC=%errorlevel%"
 if "%PSRC%"=="2" goto :netdrive
 if "%PSRC%"=="3" goto :pctpath
@@ -77,6 +86,15 @@ echo        PowerShell window.
 pause
 exit /b 1
 
+:nops1
+echo.
+echo [FAIL] Fix-AudioMixer.ps1 is not in the folder this file was started from:
+echo        "%~dp0"
+echo        If you opened it from inside a ZIP archive, extract the whole archive first
+echo        and run Fix-AudioMixer.cmd from the extracted folder. Nothing was changed.
+pause
+exit /b 1
+
 :elevated
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0Fix-AudioMixer.ps1"
 set "RC=%errorlevel%"
@@ -85,4 +103,3 @@ if "%RC%"=="0" echo Done - no failures reported. Review the [OK] / [WARN] lines 
 if not "%RC%"=="0" echo Done - the script reported failures. Review the [FAIL] lines above.
 pause
 exit /b %RC%
-

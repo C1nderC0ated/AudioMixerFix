@@ -29,8 +29,11 @@ try {
     $a.WaitForExit()
 
     Write-Host '  -- an all-audio boost holds the mutex (simulated by a helper process) --'
-    $holder = Start-Process powershell -ArgumentList '-NoProfile', '-Command', "`$m = New-Object Threading.Mutex(`$false, 'AppVolumeBooster.AllAudio'); Start-Sleep -Seconds 12" -PassThru -WindowStyle Hidden
-    Start-Sleep -Seconds 3
+    $holder = Start-Process powershell -ArgumentList '-NoProfile', '-Command', "`$m = New-Object Threading.Mutex(`$false, 'AppVolumeBooster.AllAudio'); Start-Sleep -Seconds 25" -PassThru -WindowStyle Hidden
+    # until the helper really holds it (a fixed 3 s was not enough on a busy machine)
+    $held = $null; $dl = (Get-Date).AddSeconds(30)
+    while ((Get-Date) -lt $dl -and -not [Threading.Mutex]::TryOpenExisting('AppVolumeBooster.AllAudio', [ref]$held)) { Start-Sleep -Milliseconds 200 }
+    if ($held) { $held.Close() }
     $r = Invoke-Claim; Write-Host ('     a second all-audio: ' + $r)
     Assert ($r -match '^REFUSED: another booster is already boosting all audio') 'a second all-audio boost refuses'
     $r = Invoke-Booster @('--pid', $player.Id, '--boost', '100', '--seconds', '3')

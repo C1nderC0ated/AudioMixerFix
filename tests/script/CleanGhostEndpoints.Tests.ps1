@@ -9,7 +9,12 @@ $Elevated = $true; $CheckOnly = $false
 $BackupDir = New-TestScratch 'bk'
 function Ensure-BackupDir { }
 function Initialize-RegDel { }
-function Get-Service { [pscustomobject]@{ Status = 'Running' } }
+# Audiosrv is running, and one vendor service that depends on it was running too
+function Get-Service { param([string]$Name, [switch]$DependentServices, $ErrorAction)
+    if ($DependentServices) { return @([pscustomobject]@{ Name = 'FakeVendorAudio'; Status = 'Running' }, [pscustomobject]@{ Name = 'FakeIdle'; Status = 'Stopped' }) }
+    [pscustomobject]@{ Name = $Name; Status = 'Running' }
+}
+foreach ($f in 'Get-RunningAudioDependents', 'Start-AudioDependents') { . ([scriptblock]::Create((Get-ShippedFunction $f))) }
 
 $root = "$TestKey\ghosts"
 function New-Ghost {
@@ -43,6 +48,24 @@ Assert ((Summary) -notmatch 'audio services restarted') 'the summary does not cl
 Write-Host '  -- both start again --'
 Run-Step
 Assert ((Summary) -match 'audio services restarted') 'the normal case still says restarted'
+Assert (($global:Calls.IndexOf('Start-Service FakeVendorAudio')) -gt ($global:Calls.IndexOf('Start-Service Audiosrv')) -and $global:Calls -notcontains 'Start-Service FakeIdle') 'the service that depends on Audiosrv and was running is started again too (it used to stay down until a reboot)'
+Assert ((Count-Reports '`[INFO`] A removed device that is connected again gets a fresh entry*cannot simply be imported again*') -eq 1 -and (Count-Reports '*To restore, import*') -eq 0) 'the closing line no longer promises a restore by .reg import (administrators cannot create keys there)'
+
+Write-Host '  -- a ghost the user had disabled before it went away (DeviceState 0x10000004) --'
+New-Item -Path "$root\Render\{ghost2}\Properties" -Force | Out-Null
+New-ItemProperty -Path "$root\Render\{ghost2}" -Name DeviceState -Value 0x10000004 -PropertyType DWord -Force | Out-Null
+Run-Step
+Assert ((Count-Reports '`[INFO`] 2 ghost endpoint(s):') -eq 1) 'it is found (the exact comparison with 4 missed it)'
+Remove-Item -LiteralPath "$root\Render\{ghost2}" -Recurse -Force
+
+Write-Host '  -- the preview, in an ordinary (not elevated) window --'
+$Elevated = $false; $CheckOnly = $true
+Run-Step
+Assert ((Count-Reports '`[FAIL`]*') -eq 0 -and (Count-Reports '`[INFO`] CheckOnly - not removing.') -eq 1 -and (Count-Reports '`[INFO`] 1 ghost endpoint(s):') -eq 1) '-CheckOnly lists the ghosts without admin rights (it used to be refused with [FAIL])'
+$CheckOnly = $false
+Run-Step
+Assert ((Count-Reports '`[FAIL`] Requires admin*Re-run this command from an elevated PowerShell window.') -eq 1 -and @($global:Calls | Where-Object { $_ -like 'Stop-Service*' }).Count -eq 0) 'the real run refuses without elevation, and points at the command, not at the launcher'
+$Elevated = $true
 
 Write-Host '  -- a removal fails in a way nobody anticipated (RegDel throws) --'
 [RegDel]::Mode = 'throw'

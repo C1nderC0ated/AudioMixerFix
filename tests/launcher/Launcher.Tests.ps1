@@ -36,6 +36,8 @@ if ($m.Success) {
 Assert ([IO.DriveType]::Network.ToString() -eq 'Network') 'the enum name it compares against really is "Network"'
 
 Write-Host '  -- every exit-code branch, fltmc and PowerShell stubbed --'
+# the launcher first looks for the script next to itself; the copies below sit in $scratch
+Set-Content -LiteralPath (Join-Path $scratch 'Fix-AudioMixer.ps1') -Value '# stand-in: never run'
 function Invoke-Launcher([string]$name, [int]$fltmc, [int]$ps) {
     $t = $src.Replace('fltmc >nul 2>&1', "cmd /c exit $fltmc")
     $t = $t.Replace($psLine, "echo [WOULD-ELEVATE] & cmd /c exit $ps")
@@ -63,6 +65,16 @@ Assert (($r.Code -eq 1) -and ($r.Out -match 'declined or failed') -and ($r.Out -
 $r = Invoke-Launcher 'psneg' 1 -1
 Assert (($r.Code -eq 1) -and ($r.Out -match 'declined or failed')) 'a negative code -> a failure too, not a silent exit 0'
 
+Write-Host '  -- the launcher on its own, as Explorer runs it from inside a ZIP --'
+$lone = Join-Path $scratch 'lone'
+New-Item -ItemType Directory -Force -Path $lone | Out-Null
+$t = $src.Replace('fltmc >nul 2>&1', 'cmd /c exit 1').Replace($psLine, 'echo [WOULD-ELEVATE] & cmd /c exit 0')
+$t = $t.Replace($work, 'echo [WORKER-RAN] & cmd /c exit 0').Replace('pause', 'echo [PAUSE-REACHED]')
+[IO.File]::WriteAllText((Join-Path $lone 'Fix-AudioMixer.cmd'), $t, $ascii)
+$r = Invoke-Batch (Join-Path $lone 'Fix-AudioMixer.cmd')
+Assert (($r.Code -eq 1) -and ($r.Out -match 'Fix-AudioMixer\.ps1 is not in the folder') -and ($r.Out -match '\[PAUSE-REACHED\]')) 'without Fix-AudioMixer.ps1 next to it -> says so and what to do, paused, exit 1'
+Assert ($r.Out -notmatch '\[WOULD-ELEVATE\]|\[WORKER-RAN\]') '... before asking for elevation (it used to go through the prompt and end with PowerShell''s own error)'
+
 Write-Host '  -- the elevated relaunch, from folders with awkward names --'
 $psRun = $psLine.Replace('-Verb RunAs', '-Wait -WindowStyle Hidden')
 Assert ($psRun -ne $psLine) 'swapped -Verb RunAs for -Wait'
@@ -75,7 +87,10 @@ $cases = @(
     @{ N = 'plain' }, @{ N = 'a (1)' }, @{ N = 'R&D' }, @{ N = 'a & b' }, @{ N = 'a ^ b' }, @{ N = 'a@b' },
     @{ N = "it's" }, @{ N = 'a, b' }, @{ N = '100% b' }, @{ N = 'Bo%b & Co' }, @{ N = 'a%NoSuchVar%b' },
     @{ N = 'a^b!c%NoSuchVar%d' }, @{ N = "$cyrillic %NoSuchVar%"; L = '(Cyrillic) %NoSuchVar%' },
-    @{ N = 'a%OS%b'; Refuse = $true }, @{ N = '%USERNAME% kit'; Refuse = $true }, @{ N = 'a%CD%b'; Refuse = $true }
+    # a caret next to a harmless pair, with no "!" in the path: these were refused
+    @{ N = 'a^b%NoSuchVar%c' }, @{ N = 'a%NoSuchVar%^c' },
+    @{ N = 'a%OS%b'; Refuse = $true }, @{ N = '%USERNAME% kit'; Refuse = $true }, @{ N = 'a%CD%b'; Refuse = $true },
+    @{ N = 'a^%OS%b'; Refuse = $true }, @{ N = 'a!%OS%b'; Refuse = $true }
 )
 foreach ($c in $cases) {
     $label = if ($c.L) { $c.L } else { $c.N }

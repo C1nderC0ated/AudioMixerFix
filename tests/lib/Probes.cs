@@ -14,7 +14,17 @@ namespace AppVolumeBoosterNs
     //   watch <pid> <ms> <out>             sample volume + mute every 50 ms, log transitions
     //   gaps  <pid> <ms> <out>             RECORD that process tree's output (process loopback,
     //                                      nothing is played) and report every run of exact
-    //                                      digital silence >= 1 ms between its first and last sound
+    //                                      digital silence >= 1 ms between its first and last sound,
+    //                                      plus the level of the sound (rms and peak, full scale = 1)
+    //   procs <pid,pid,...> <out>          the booster's own view of the processes: a line
+    //                                      "pid|parent|name" for each one running, "ask|pid|name"
+    //                                      for each pid asked about, and how long both lookups take
+    //   sleep <ms>                         just stay alive that long
+    //   shot  <out.png> [idle|boosting|waiting|empty]
+    //                                      a picture of the booster's window, shown far off
+    //                                      screen. With a look given, the list holds stand-in
+    //                                      rows and the window is dressed as in that state;
+    //                                      nothing is boosted.
     // Only ever touches the one pid it is given.
     internal static class Probes
     {
@@ -54,6 +64,97 @@ namespace AppVolumeBoosterNs
                 foreach (IMMDevice dv in devs) { string id; dv.GetId(out id); sb.AppendLine(id); }
                 sb.AppendLine("sessions=" + Native.AllRenderSessions().Count);
                 File.WriteAllText(a[1], sb.ToString());
+                return 0;
+            }
+            if (mode == "sleep") { Thread.Sleep(int.Parse(a[1], CultureInfo.InvariantCulture)); return 0; }
+            if (mode == "procs")
+            {
+                StringBuilder sb = new StringBuilder();
+                Dictionary<uint, uint> map = Native.ParentMap();
+                foreach (KeyValuePair<uint, uint> kv in map)
+                    sb.AppendLine(kv.Key.ToString() + "|" + kv.Value.ToString() + "|" + (Native.ProcessNameOf(kv.Key) ?? ""));
+                foreach (string s in a[1].Split(','))
+                {
+                    uint q; if (!uint.TryParse(s, out q)) continue;
+                    sb.AppendLine("ask|" + q.ToString() + "|" + (Native.ProcessNameOf(q) ?? ""));
+                }
+                // medians, so that one interrupted call does not decide the result
+                uint self = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
+                List<double> tn = new List<double>(), tm = new List<double>();
+                for (int i = 0; i < 200; i++)
+                {
+                    long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+                    Native.ProcessNameOf(self);
+                    tn.Add((System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency);
+                }
+                for (int i = 0; i < 21; i++)
+                {
+                    long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+                    Native.ParentMap();
+                    tm.Add((System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency);
+                }
+                tn.Sort(); tm.Sort();
+                sb.AppendLine(string.Format(CultureInfo.InvariantCulture, "time|nameMs={0:F4}|mapMs={1:F3}|processes={2}", tn[tn.Count / 2], tm[tm.Count / 2], map.Count));
+                File.WriteAllText(a[2], sb.ToString());
+                return 0;
+            }
+            if (mode == "shot")
+            {
+                System.Reflection.BindingFlags np = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+                MainForm f = new MainForm();
+                f.StartPosition = System.Windows.Forms.FormStartPosition.Manual;
+                f.Location = new System.Drawing.Point(-4000, -4000);
+                f.ShowInTaskbar = false;
+                f.Show();
+                for (int i = 0; i < 40; i++) { System.Windows.Forms.Application.DoEvents(); Thread.Sleep(10); }
+                string look = a.Length > 2 ? a[2] : "";
+                if (look != "")
+                {
+                    System.Windows.Forms.CheckedListBox list = (System.Windows.Forms.CheckedListBox)typeof(MainForm).GetField("list", np).GetValue(f);
+                    List<uint> listPids = (List<uint>)typeof(MainForm).GetField("listPids", np).GetValue(f);
+                    List<string> listNames = (List<string>)typeof(MainForm).GetField("listNames", np).GetValue(f);
+                    list.Items.Clear(); listPids.Clear(); listNames.Clear();
+                    string win = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+                    string[] exes = {
+                        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), @"Thorium\Application\thorium.exe"),
+                        Path.Combine(win, "explorer.exe"), Path.Combine(win, @"System32\notepad.exe"),
+                        Path.Combine(win, @"System32\mspaint.exe"), Path.Combine(win, @"System32\WindowsPowerShell\v1.0\powershell.exe"),
+                        Path.Combine(win, @"System32\SnippingTool.exe"), Path.Combine(win, @"System32\cmd.exe") };
+                    uint fake = 1000;
+                    foreach (string exe in exes)
+                    {
+                        if (look == "empty" || !File.Exists(exe)) continue;
+                        AppEntry e = new AppEntry();
+                        e.Pid = fake; fake += 444;
+                        e.Name = Path.GetFileNameWithoutExtension(exe);
+                        e.Playing = list.Items.Count < 2;
+                        e.Describe(exe);
+                        list.Items.Add(e); listPids.Add(e.Pid); listNames.Add(e.Name);
+                    }
+                    if (list.Items.Count > 0) list.SetItemChecked(0, true);
+                    if (look == "boosting" || look == "waiting")
+                    {
+                        System.Windows.Forms.Button start = (System.Windows.Forms.Button)typeof(MainForm).GetField("startBtn", np).GetValue(f);
+                        start.Text = "Stop boost";
+                        typeof(MainForm).GetMethod("StyleActionButton", np).Invoke(f, new object[] { true });
+                        typeof(MainForm).GetMethod("SetBusy", np).Invoke(f, new object[] { true });
+                        string title = list.Items.Count > 0 ? ((AppEntry)list.Items[0]).Title : "the app";
+                        if (look == "boosting")
+                            typeof(MainForm).GetMethod("Say", np).Invoke(f, new object[] { Theme.AccentLight, "Boosting " + title + " at 150%",
+                                "In the Windows Volume Mixer the app's own slider sits at 4% meanwhile - that is how it works. Delay about 60 ms, dropouts: 0." });
+                        else
+                            typeof(MainForm).GetMethod("Say", np).Invoke(f, new object[] { Theme.Muted, "Waiting - no sound from " + title + " yet",
+                                "Nothing is boosted until it plays. The boost starts by itself when it does." });
+                    }
+                    list.Invalidate();
+                    for (int i = 0; i < 20; i++) { System.Windows.Forms.Application.DoEvents(); Thread.Sleep(10); }
+                }
+                using (System.Drawing.Bitmap bmp = new System.Drawing.Bitmap(f.Width, f.Height))
+                {
+                    f.DrawToBitmap(bmp, new System.Drawing.Rectangle(0, 0, f.Width, f.Height));
+                    bmp.Save(a[1], System.Drawing.Imaging.ImageFormat.Png);
+                }
+                f.Close();
                 return 0;
             }
             if (mode == "list")
@@ -171,9 +272,13 @@ namespace AppVolumeBoosterNs
                         }
                         run = 0;
                     }
+                    // the level between the first and the last sound (each frame's louder channel)
+                    double sq = 0; float peak = 0; int nLevel = 0;
+                    for (int i = Math.Max(first, 0); first >= 0 && i <= last; i++) { sq += (double)fr[i] * fr[i]; if (fr[i] > peak) peak = fr[i]; nLevel++; }
                     report = string.Format(CultureInfo.InvariantCulture,
-                        "gaps={0} gapMs={1:0.0} longestMs={2:0.0} soundMs={3} recordedMs={4} discont={5} at:{6}",
-                        gaps, gapFrames / 48.0, longest / 48.0, first < 0 ? 0 : (last - first) / 48, fr.Count / 48, discont, at.ToString());
+                        "gaps={0} gapMs={1:0.0} longestMs={2:0.0} soundMs={3} recordedMs={4} discont={5} rms={7:0.0000000} peak={8:0.0000000} at:{6}",
+                        gaps, gapFrames / 48.0, longest / 48.0, first < 0 ? 0 : (last - first) / 48, fr.Count / 48, discont, at.ToString(),
+                        nLevel == 0 ? 0.0 : Math.Sqrt(sq / nLevel), peak);
                 });
                 File.WriteAllText(a[3], report ?? "(no report)");
                 return 0;

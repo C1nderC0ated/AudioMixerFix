@@ -49,13 +49,16 @@ Write-Host '  -- the browsers the script patches, and the README --'
 $exeLine = @($ps1 -split "`r?`n" | Where-Object { $_ -match '^\$BrowserExes\s*=' })
 $exes = @(if ($exeLine.Count -eq 1) { [regex]::Matches($exeLine[0], "'([^']+\.exe)'") | ForEach-Object { $_.Groups[1].Value } })
 $display = @{ 'thorium.exe' = 'Thorium'; 'chrome.exe' = 'Chrome'; 'msedge.exe' = 'Edge'; 'brave.exe' = 'Brave'
-              'vivaldi.exe' = 'Vivaldi'; 'opera.exe' = 'Opera'; 'opera_gx.exe' = 'Opera GX'; 'browser.exe' = 'Yandex Browser' }
+              'vivaldi.exe' = 'Vivaldi'; 'opera.exe' = 'Opera'; 'browser.exe' = 'Yandex Browser'
+              'chrome_proxy.exe' = 'Chrome'; 'msedge_proxy.exe' = 'Edge'; 'vivaldi_proxy.exe' = 'Vivaldi' }
 $row = @($readme -split "`n" | Where-Object { $_ -match "Chromium's audio sandbox" })
 Assert ($exes.Count -ge 1 -and $row.Count -eq 1) ('found the $BrowserExes line ({0} browsers) and the README symptom row' -f $exes.Count)
 foreach ($x in $exes) {
     # a new exe without a display name here fails on purpose: add it to $display AND the README
     Assert ($display.ContainsKey($x) -and $row[0].Contains($display[$x])) ('the README names the browser behind {0}' -f $x)
 }
+# Opera GX has no exe name of its own in the list: its shortcuts point at launcher.exe
+Assert ($row.Count -eq 1 -and $row[0].Contains('Opera GX') -and $code -match "launcher\.exe") 'the README names Opera GX, and the script recognises Opera''s launcher.exe'
 
 Write-Host '  -- where backups go --'
 $fallback = [regex]::Match($ps1, "Combine\(\`$env:LOCALAPPDATA, '([^']+)'\)").Groups[1].Value
@@ -80,6 +83,13 @@ foreach ($m in [regex]::Matches($csCode, '\binterface\s+(\w+)\s*\{')) {
 }
 Write-Host ('     {0} COM interfaces, {1} methods, {2} with [PreserveSig]' -f $ifaces, $methods, $covered)
 Assert ($methods -gt 0 -and $covered -eq $methods) 'every COM interface method carries [PreserveSig]'
+# a plain C# bool in a [ComImport] signature is a 2-byte VARIANT_BOOL against the native
+# 4-byte BOOL; it read the right answer only by luck of the padding
+$comBlock = $csCode.Substring(0, $csCode.IndexOf('internal static class Native'))
+$sigs = @([regex]::Matches($comBlock, '\[PreserveSig\][^;]*;') | ForEach-Object { $_.Value })
+$boolSigs = @($sigs | Where-Object { $_ -match '\bbool\b' })
+$plain = @($boolSigs | Where-Object { $_ -notmatch 'UnmanagedType\.Bool' })
+Assert ($boolSigs.Count -ge 3 -and $plain.Count -eq 0) ('every bool in a COM signature is marshalled as a 4-byte BOOL ({0} bool parameters{1})' -f $boolSigs.Count, $(if ($plain) { '; plain: ' + (($plain | ForEach-Object { $_.Trim() }) -join ' | ') } else { '' }))
 Assert ($vbdoc -match ('\b{0} today\b' -f $methods)) ('the doc gives today''s count ({0})' -f $methods)
 function Num([string]$pattern) { $g = [regex]::Match($cs, $pattern).Groups[1]; if ($g.Success) { [double]$g.Value } else { [double]::NaN } }
 $pad  = Num 'volatile int targetPadFrames = (\d+);'

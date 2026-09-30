@@ -19,6 +19,23 @@
 #   New-Fault10Source <src> <faultOut> <nofixOut>
 #       the output "dies" about 1 s in (AUDCLNT_E_DEVICE_INVALIDATED from GetCurrentPadding);
 #       the nofix variant also loses the watcher's check - the original bug
+#   New-NoWatcherDuckSource <src> <out>
+#       the watcher's periodic duck pass removed: only the session-created callback can
+#       duck a new session (it never fired before the registration was armed)
+#   New-FaultCaptureSource <src> <out>
+#       the capture client "dies" about 1 s in (AUDCLNT_E_DEVICE_INVALIDATED from
+#       GetNextPacketSize) while the output stays healthy
+#   New-RestoreFailSource <src> <out>
+#       every slider restore at Stop fails (skipped and counted as failed)
+#   New-RefuseFirstCaptureSource <src> <out>
+#       with more than one target, the capture of the first is refused
+#   New-HookDeniedSource <src> <out>
+#       waiting for a target's exit is refused with "Access is denied", as it is for an app
+#       running as administrator when the booster is not
+#   New-NoProcessListSource <src> <out>
+#       the list of running processes comes back empty
+#   New-GainSource <src> <out> <expression>
+#       the gain formula replaced by <expression> (to show that the level test can fail)
 #
 # Edits are a FLAT list: old1, new1, old2, new2, ...  (nested arrays built with the unary
 # comma are easy to get one level wrong in PowerShell, and a wrong level applies nothing).
@@ -149,4 +166,50 @@ function New-Fault10Source([string]$Source, [string]$FaultOut, [string]$NoFixOut
     Edit-Source $Source $NoFixOut ($fault + @(
         "                string fatal = fatalReason;`n                if (fatal != null) { StopBecause(fatal); return; }`n", ''
     ))
+}
+
+function New-NoWatcherDuckSource([string]$Source, [string]$Out) {
+    Edit-Source $Source $Out @(
+        "                if (!boostAll && watchTick % 20 == 0) RebuildTrees();`n                DuckPass();`n",
+        "                if (!boostAll && watchTick % 20 == 0) RebuildTrees();`n"
+    )
+}
+
+function New-FaultCaptureSource([string]$Source, [string]$Out) {
+    Edit-Source $Source $Out @(
+        '                int hrN = capture.GetNextPacketSize(out pkt);',
+        '                int hrN = capture.GetNextPacketSize(out pkt); if (Interlocked.Read(ref CapSamples) > 96000) hrN = unchecked((int)0x88890004);'
+    )
+}
+
+function New-RestoreFailSource([string]$Source, [string]$Out) {
+    Edit-Source $Source $Out @(
+        '                        try { if (d.Vol.SetMasterVolume(d.Prior, IntPtr.Zero) < 0) failed++; }',
+        '                        try { failed++; }'
+    )
+}
+
+function New-RefuseFirstCaptureSource([string]$Source, [string]$Out) {
+    Edit-Source $Source $Out @(
+        '                    try { pendingCaps.Add(Native.ActivateProcessLoopback(root, false)); }',
+        '                    try { if (roots.Count > 1 && root == roots[0]) throw new InvalidOperationException("test: capture refused"); pendingCaps.Add(Native.ActivateProcessLoopback(root, false)); }'
+    )
+}
+
+function New-HookDeniedSource([string]$Source, [string]$Out) {
+    Edit-Source $Source $Out @(
+        '                    p.EnableRaisingEvents = true;',
+        '                    if (pid != 0) throw new System.ComponentModel.Win32Exception(5);'
+    )
+}
+
+function New-NoProcessListSource([string]$Source, [string]$Out) {
+    Edit-Source $Source $Out @(
+        '        static Dictionary<uint, uint> ParentMap() { return Native.ParentMap(); }',
+        '        static Dictionary<uint, uint> ParentMap() { return new Dictionary<uint, uint>(); }'
+    )
+}
+
+function New-GainSource([string]$Source, [string]$Out, [string]$Expression) {
+    Edit-Source $Source $Out @('            gain = boost / DUCK;', "            gain = $Expression;")
 }

@@ -58,4 +58,3 @@ echo        Close AppVolumeBooster and run this again. New build kept at:
 echo        %NEW%
 pause
 exit /b 1
-

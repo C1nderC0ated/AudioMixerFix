@@ -2,11 +2,11 @@
 Runs the kit's tests. Windows PowerShell 5.1, nothing to install. From the kit folder:
 
   powershell -NoProfile -ExecutionPolicy Bypass -File tests\Run-Tests.ps1
-      the fast suites - script, launcher and build. About two and a half minutes; nothing on the
+      the fast suites - script, launcher and build. About three minutes; nothing on the
       machine is changed (see tests\README.md for exactly what they touch).
 
   powershell -NoProfile -ExecutionPolicy Bypass -File tests\Run-Tests.ps1 -Audio
-      the booster's audio tests as well. About five more minutes, during which a private
+      the booster's audio tests as well. About ten more minutes, during which a private
       test process plays a faint tone and gets boosted. Nothing else is boosted.
 
   ... -Only Launcher,Consistency
@@ -41,8 +41,10 @@ if ($Only.Count -gt 0) {
 }
 
 Write-Host ('Running {0} test file(s) from {1}' -f $files.Count, ($suites -join ', ')) -ForegroundColor White
+# nothing to run is not a pass: a missing or renamed suite folder used to end "0 failing", exit 0
+if ($files.Count -eq 0) { Write-Host 'No test files were found - nothing was checked.' -ForegroundColor Red; exit 1 }
 if ($Audio) {
-    Write-Host 'The booster tests take about five minutes. A private PowerShell process plays a faint tone' -ForegroundColor Yellow
+    Write-Host 'The booster tests take about ten minutes. A private PowerShell process plays a faint tone' -ForegroundColor Yellow
     Write-Host '(about -58 dBFS) and only that process is boosted; its mixer volume is put back each time.' -ForegroundColor Yellow
 }
 $all = [Diagnostics.Stopwatch]::StartNew()
@@ -75,4 +77,5 @@ $checks = ($rows | Measure-Object Pass -Sum).Sum + ($rows | Measure-Object Fail 
 $failing = ($rows | Measure-Object Fail -Sum).Sum
 $badFiles = @($rows | Where-Object { -not $_.Ok }).Count
 Write-Host ('{0} checks in {1} file(s), {2} failing, {3} file(s) failing - {4:N0} s' -f $checks, $rows.Count, $failing, $badFiles, $all.Elapsed.TotalSeconds) -ForegroundColor $(if ($badFiles) { 'Red' } else { 'Green' })
+if (-not $Audio) { Write-Host 'The booster''s audio tests were not part of this run (add -Audio for them).' -ForegroundColor Gray }
 if ($badFiles) { exit 1 } else { exit 0 }

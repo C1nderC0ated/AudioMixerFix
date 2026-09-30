@@ -89,7 +89,7 @@ try {
     $enforced = $true; try { [IO.File]::WriteAllText((Join-Path $k5 'x.txt'), 'x'); $enforced = $false } catch { }
     if ($enforced) {
         $r = Invoke-Kit $k5 $l5
-        Assert (($r.Rc -eq 0) -and (Has $r.Out 'backups go to') -and (Has $r.Out '== Summary ==')) 'falls back and completes'
+        Assert (($r.Rc -eq 0) -and (Has $r.Out 'backups go to') -and (Has $r.Out '== Summary ==')) ('falls back and completes (exit {0}, fallback announced: {1}, Summary: {2})' -f $r.Rc, (Has $r.Out 'backups go to'), (Has $r.Out '== Summary =='))
     } else { Write-Host '     (the deny entry is not enforced for this account - skipped)' }
 } finally { & icacls $k5 /remove:d '*S-1-1-0' | Out-Null }
 

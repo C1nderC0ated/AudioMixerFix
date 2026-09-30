@@ -29,6 +29,15 @@ Assert ((Count-Reports '`[OK`] DisableAbsoluteVolume = 0 written.') -eq 1) 'enab
 Reset-Log; Set-BtAbsoluteVolume $false
 Assert ((Count-Reports '`[OK`] Already set*') -eq 1) 'running it again: "Already set"'
 
+Write-Host '  -- the preview, in an ordinary (not elevated) window --'
+$Elevated = $false; $CheckOnly = $true
+Reset-Log; Set-BtAbsoluteVolume $true
+Assert ((Count-Reports '`[INFO`] WOULD set DisableAbsoluteVolume = 1 (currently 0).') -eq 1 -and (Count-Reports '`[FAIL`]*') -eq 0) '-CheckOnly previews without admin rights (it used to be refused with [FAIL])'
+$CheckOnly = $false
+Reset-Log; Set-BtAbsoluteVolume $true
+Assert ((Count-Reports '`[FAIL`] Requires admin*elevated PowerShell window*') -eq 1 -and (Get-ItemProperty $BtCtKey).DisableAbsoluteVolume -eq 0) 'the real run still refuses without elevation, and writes nothing'
+$Elevated = $true
+
 Write-Host '  -- reg.exe succeeds, but the value is not where the script reads it --'
 # the two copies of the key path ($BtCtKey, $BtCtReg) drifting apart: exit 0 alone must
 # not mean [OK]

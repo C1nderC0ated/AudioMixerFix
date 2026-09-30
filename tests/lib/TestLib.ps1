@@ -15,6 +15,8 @@
 #   Assert <cond> <what>      one PASS / FAIL line
 #   Q <path>                  the path in double quotes, for Start-Process -ArgumentList
 #   Complete-Test             cleans up and exits 0 (all passed) or 1
+#   $Cleanups                 script blocks Complete-Test runs first (the audio rig puts the
+#                             booster's crash note back through one)
 #
 # Any file under test can be swapped for another copy - an older version, or a mutated
 # one - without touching the tests. The variables and the files they replace:
@@ -35,6 +37,7 @@ $script:AmfVars = @{
 }
 $script:AmfShown = @{}
 $script:Scratches = New-Object System.Collections.Generic.List[string]
+$script:Cleanups = New-Object System.Collections.Generic.List[scriptblock]
 
 function Get-KitFile([string]$relative) {
     $var = $script:AmfVars[$relative]
@@ -74,6 +77,7 @@ function Assert([bool]$cond, [string]$what) {
 }
 
 function Complete-Test {
+    foreach ($c in $script:Cleanups) { try { & $c } catch { Write-Host ('    FAIL  cleanup: ' + $_); $global:AnyFail = $true } }
     foreach ($d in $script:Scratches) { Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue }
     if (Test-Path -LiteralPath $TestKey) { Remove-Item -LiteralPath $TestKey -Recurse -Force -ErrorAction SilentlyContinue }
     if ($global:AnyFail) { exit 1 } else { exit 0 }

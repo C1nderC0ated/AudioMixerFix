@@ -1,15 +1,17 @@
 trap { Write-Host ('    FAIL  harness error: ' + $_); $global:AnyFail = $true; continue }
 . "$PSScriptRoot\..\lib\TestLib.ps1"
 . "$PSScriptRoot\..\lib\AudioRig.ps1"
-# The booster keeps a crash-recovery note (booster-state.txt) next to its exe. From a
-# read-only folder that write used to fail silently, so a crash mid-boost left nothing to
-# repair the slider with. It now falls back to %LOCALAPPDATA%\AppVolumeBooster, and removes
-# the note again after a clean stop. The read-only folder is a scratch copy with write
-# denied to the current account.
+# The booster keeps a crash-recovery note (booster-state.txt) in %LOCALAPPDATA%\AppVolumeBooster
+# - one per user, shared by every copy of the exe - and removes it again after a clean stop.
+# It used to sit next to the exe: a copy in a read-only folder (a write-protected stick,
+# Program Files) then lost the note in an empty catch, and two copies in different folders
+# kept separate notes, so the second could take a slider the first held at 4% for the real
+# level. The read-only folder here is a scratch copy with write denied to the current account.
 Build-Rig
-$fallbackDir = Join-Path $env:LOCALAPPDATA 'AppVolumeBooster'
-$fallback = Join-Path $fallbackDir 'booster-state.txt'
-$hadFallbackDir = Test-Path -LiteralPath $fallbackDir
+$noteDir = Join-Path $env:LOCALAPPDATA 'AppVolumeBooster'
+$note = Join-Path $noteDir 'booster-state.txt'
+$hadNoteDir = Test-Path -LiteralPath $noteDir
+$noteBefore = if (Test-Path -LiteralPath $note) { [IO.File]::ReadAllText($note) } else { $null }
 $ro = Join-Path $Rig.Dir 'readonly'
 New-Item -ItemType Directory -Force -Path $ro | Out-Null
 Copy-Item -LiteralPath (Join-Path $Rig.Dir 'AppVolumeBooster.exe') -Destination $ro
@@ -26,29 +28,35 @@ try {
     Write-Host ('  private player pid {0}; original state {1} (restored at the end)' -f $player.Id, $orig)
     function Watch-Boost([string]$exe) {
         $b = Start-Booster -Exe $exe -BoosterArgs @('--pid', $player.Id, '--boost', '100', '--seconds', '3') -Log (Join-Path $Rig.Dir ('w' + [guid]::NewGuid().ToString('N') + '.log'))
-        $seen = @{ ExeDir = $false; Fallback = $false }
+        $seen = @{ ExeDir = $false; Note = $false; NoteText = '' }
         $deadline = (Get-Date).AddSeconds(8)
         while (-not $b.HasExited -and (Get-Date) -lt $deadline) {
             if (Test-Path -LiteralPath (Join-Path (Split-Path $exe) 'booster-state.txt')) { $seen.ExeDir = $true }
-            if (Test-Path -LiteralPath $fallback) { $seen.Fallback = $true }
+            if (Test-Path -LiteralPath $note) { $seen.Note = $true; try { $seen.NoteText = [IO.File]::ReadAllText($note) } catch { } }
             Start-Sleep -Milliseconds 100
         }
         $b.WaitForExit()
         $seen
     }
-    Write-Host '  -- a writable folder: the note sits next to the exe, as documented --'
+    Write-Host '  -- a writable folder --'
     $s = Watch-Boost (Join-Path $Rig.Dir 'AppVolumeBooster.exe')
-    Assert ($s.ExeDir -and -not $s.Fallback) 'written next to the exe, not to the fallback'
+    Assert ($s.Note -and -not $s.ExeDir) 'the note is written to %LOCALAPPDATA%\AppVolumeBooster, not next to the exe'
+    $prior = if ($s.NoteText -match '(?m)^\d+\|powershell\|([0-9.]+)') { [double]::Parse($Matches[1], [Globalization.CultureInfo]::InvariantCulture) } else { -1 }
+    $was = if ($orig -match 'vol=([0-9.]+)') { [double]::Parse($Matches[1], [Globalization.CultureInfo]::InvariantCulture) } else { -2 }
+    Assert ([math]::Abs($prior - $was) -lt 0.001) ('... naming the target and its real level ({0})' -f ($s.NoteText -replace '\s+', ' ').Trim())
+    Assert (-not (Test-Path -LiteralPath $note) -or [IO.File]::ReadAllText($note) -eq [string]$noteBefore) '... and it is gone again after a clean stop'
     Write-Host '  -- a read-only folder --'
     $s = Watch-Boost (Join-Path $ro 'AppVolumeBooster.exe')
-    Assert (-not $s.ExeDir) 'nothing written into the read-only folder'
-    Assert ($s.Fallback) 'the note went to %LOCALAPPDATA%\AppVolumeBooster instead'
-    Assert (-not (Test-Path -LiteralPath $fallback)) '... and is removed again after a clean stop'
+    Assert (-not $s.ExeDir) 'nothing is written into the read-only folder (and nothing fails)'
+    Assert ($s.Note) 'the note went to %LOCALAPPDATA%\AppVolumeBooster as before'
     Assert (Test-Restored $player $orig) 'the boost itself worked and restored the player'
 }
 finally {
     if ($player) { Stop-Player $player $orig }
     & icacls $ro /remove:d $me | Out-Null
-    if (-not $hadFallbackDir -and (Test-Path -LiteralPath $fallbackDir) -and -not (Get-ChildItem -LiteralPath $fallbackDir)) { Remove-Item -LiteralPath $fallbackDir }
+    # leave the real note file exactly as it was
+    if ($null -ne $noteBefore) { [IO.File]::WriteAllText($note, $noteBefore) }
+    elseif (Test-Path -LiteralPath $note) { Remove-Item -LiteralPath $note -Force }
+    if (-not $hadNoteDir -and (Test-Path -LiteralPath $noteDir) -and -not (Get-ChildItem -LiteralPath $noteDir)) { Remove-Item -LiteralPath $noteDir }
 }
 Complete-Test

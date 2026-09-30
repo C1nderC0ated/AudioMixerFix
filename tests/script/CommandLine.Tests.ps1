@@ -30,4 +30,19 @@ Write-Host '  -- two action switches at once --'
 $r = Invoke-Script @('-Status', '-Revert')
 Assert ($r.Code -eq 2 -and $r.Out -match 'Mutually exclusive switches: -Status, -Revert') ('exit code 2, naming both (got {0})' -f $r.Code)
 
+Write-Host '  -- started by a 32-bit PowerShell --'
+# A 32-bit PowerShell sees no audio endpoints (a different view of HKLM\SOFTWARE), so the
+# script hands the run to the 64-bit one - with its arguments, and passing on its exit code.
+$ps32 = Join-Path $env:WINDIR 'SysWOW64\WindowsPowerShell\v1.0\powershell.exe'
+if ([Environment]::Is64BitOperatingSystem -and (Test-Path -LiteralPath $ps32)) {
+    $o = & $ps32 -NoProfile -ExecutionPolicy Bypass -File $ps1 -Status -Revert 2>&1 | Out-String
+    $rc = $LASTEXITCODE
+    Assert ($o -match 'continuing in the 64-bit one') 'it says that it hands over'
+    Assert ($rc -eq 2 -and $o -match 'Mutually exclusive switches: -Status, -Revert') ('the 64-bit run got the same arguments, and its exit code comes back (got {0})' -f $rc)
+    $o = & $ps32 -NoProfile -ExecutionPolicy Bypass -File $ps1 -Statuss 2>&1 | Out-String
+    Assert ($LASTEXITCODE -eq 2 -and $o -match 'Unknown argument\(s\): -Statuss\.') 'an unknown argument is passed on too'
+    $o = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $ps1 -Statuss 2>&1 | Out-String
+    Assert ($o -notmatch 'continuing in the 64-bit one') 'a 64-bit PowerShell just runs it'
+} else { Write-Host '     (no 32-bit PowerShell on this machine - skipped)' }
+
 Complete-Test

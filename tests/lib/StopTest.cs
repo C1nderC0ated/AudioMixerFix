@@ -26,6 +26,7 @@ namespace AppVolumeBoosterNs
         [MTAThread]
         public static int Main(string[] a)
         {
+            Native.MarkAlive();   // as Program.Main does: this process holds boosts too
             uint player = uint.Parse(a[1]);
             int iterations = int.Parse(a[2]);
             StringBuilder sb = new StringBuilder();

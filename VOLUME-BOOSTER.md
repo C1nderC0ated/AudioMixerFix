@@ -11,25 +11,30 @@ installation. If you never run it, it does nothing.
 | `VolumeBooster\AppVolumeBooster.exe` | The tool (double-click). Needs nothing installed. |
 | `VolumeBooster\AppVolumeBooster.cs` | Complete source code, one file. |
 | `VolumeBooster\Build-Booster.cmd` | Rebuilds the exe using the C# compiler that ships inside Windows - works even on a freshly reinstalled machine with no tools. It compiles to a temporary file and only then replaces the exe, so a failed rebuild leaves the working binary you already had and exits non-zero instead of reporting success. |
-| `VolumeBooster\booster-state.txt` | Appears only while a boost is active (crash-recovery data, see below). Deleted automatically. Written through a temporary file and an atomic replace, so killing the booster during the write cannot leave it truncated. If this folder is read-only (a write-protected stick, Program Files) it lives in `%LocalAppData%\AppVolumeBooster` instead, so crash recovery still works. |
+| `%LocalAppData%\AppVolumeBooster\booster-state.txt` | Appears only while a boost is active (crash-recovery data, see below). Deleted automatically. There is one per Windows user, shared by every copy of the exe, wherever a copy sits - a read-only folder included. Written through a temporary file and an atomic replace, so killing the booster during the write cannot leave it truncated. (Only if that folder cannot be used does the note go next to the exe, and failing that to `%TEMP%`.) |
+| `%LocalAppData%\AppVolumeBooster\settings.txt` | Exists only if you switched **Auto-refresh** off (one line). Switching it back on removes the file. |
 
 ## How to use it
 
-1. Start playback in the app(s) you want louder (an app must be making sound, or at least have opened audio once, to show up in the list).
+1. Start playback in the app(s) you want louder. An app shows up in the list - by its name and icon, with *playing* next to it - once it has opened audio. A Chromium browser (Chrome, Edge, Thorium, Brave, Vivaldi, Opera, Yandex Browser) gives its audio session up about 5 seconds after its last sound, so a browser that is running but quiet is listed anyway, marked *no sound right now*. It can be checked like any other entry and is boosted from the moment it plays.
 2. Double-click `AppVolumeBooster.exe`.
-3. Check one or more apps (press **Refresh** if one is missing), set the slider (100-500%), press **Start boost**.
+3. Check one or more apps, set the slider (100-500%), press **Start boost**. With **Auto-refresh** checked (it is, unless you switch it off) the list keeps itself up to date every 2 seconds while nothing is being boosted; **Refresh** rebuilds it at once. Without it, the list only changes when you press **Refresh**. The booster remembers which you chose.
 4. Optional:
-   - **Windows system sounds** - also boost beeps and notifications, without touching other apps. Windows does not give this mixer entry a real process; if capture fails, the status line says so and the reliable alternative is the next box.
+   - **Also boost Windows system sounds** - beeps and notifications, without touching other apps. Windows does not give this mixer entry a real process; if capture fails, the status line says so and the reliable alternative is the next box.
    - **Boost all audio on this device** - boost everything on the default output, including Windows system sounds. The app list is ignored while this is checked.
 5. Keep the booster window open while you need the boost. Press **Stop boost** or close the window to return everything to normal.
 
+The line under the button says in plain words what is going on - *Boosting Thorium at 150%*, *Waiting - no sound from Thorium yet*, *Stopped: the app was closed* - and the smaller line below it gives the details. Under the slider the window says what the number means (*1.5 times the normal volume*).
+
 One instance can boost several apps at once. If one of those apps closes, the others keep boosting; the booster stops when the last selected app is gone (unless you are boosting all audio or system sounds alone).
+
+**The boost belongs to the app, not to the process that happened to be playing.** Browsers and Electron apps such as Discord play their sound from a helper process, which they replace now and then, and the list entry may carry that helper's pid. The booster ties the boost to the app's main process - the top-most process of the same name - and takes in every helper the app starts later. The boost ends when the app itself closes, not when a helper is replaced. While nothing of the checked app is playing, the status line says *Waiting - no sound from (the app) yet*: nothing is boosted until it plays.
 
 ## How it works (and why the mixer slider shows 4%)
 
 Windows itself caps every per-app volume at 100% - there is no API to go higher.
 The booster uses the same OS feature OBS uses for per-application audio capture
-(*process loopback capture*, Windows 10 2004+): it captures the chosen app's
+(*process loopback capture*): it captures the chosen app's
 audio stream (or, for "all audio", everything except the booster itself),
 multiplies the samples (float math, lossless), mixes multiple captures if needed,
 and plays the louder copy to your default output.
@@ -44,8 +49,8 @@ a boost is active:
 - each boosted app's slider in the Volume Mixer sits at 4% - **by design, do not "fix" it**. That 4% is also the quickest health check there is: if a boosted app's slider does *not* drop to 4% while the boost is running, the boost is broken, and what you are hearing is the app at full volume plus a copy overdriven by 25x. Stop the boost rather than reaching for the volume knob;
 - with **Boost all audio**, every other slider (including System sounds) sits at 4% the same way;
 - **mute is never touched.** An app you muted stays muted - and silent - while boosted, and is still muted afterwards. If you meant to boost it, unmute it in the mixer (the status line tells you when a chosen app is muted);
-- a new entry `AppVolumeBooster` appears in the mixer - that is the boosted copy (leave it at 100%);
-- audio arrives with ~60 ms extra latency (fine for music/video/games; noticeable in rhythm games). That is a real 50 ms buffer, filled before the boosted copy starts, so a hiccup of up to ~50 ms passes without a sound. If the machine is busier than that - e.g. a demanding game - the booster grows the buffer by 20 ms per audible dropout, up to ~160 ms, instead of continuing to glitch. The glitch counter counts exactly those dropouts: one per gap, however long it lasts. The status line shows the current latency; stopping and restarting the boost resets it to ~60 ms;
+- a new entry `AppVolumeBooster` appears in the mixer - that is the boosted copy (leave it at 100%). Windows does not remember this entry: it starts at 100% every time and leaves nothing behind in the volume store;
+- audio arrives with ~60 ms extra latency (fine for music/video/games; noticeable in rhythm games). That is a real 50 ms buffer, filled before the boosted copy starts, so a hiccup of up to ~50 ms passes without a sound. If the machine is busier than that - e.g. a demanding game - the booster grows the buffer by 20 ms per audible dropout, up to ~160 ms, instead of continuing to glitch. The glitch counter counts exactly those dropouts: one per gap, however long it lasts. The status line shows the current latency (*Delay about 60 ms*) and the number of dropouts so far. After 90 seconds without a dropout it comes back down by 20 ms, and so on, step by step, to ~60 ms;
 - a soft limiter rounds off peaks above 95% full scale, so high boost on already-loud material compresses rather than crackles. At 500% that kicks in earlier. Mixing two loud apps can hit the limiter sooner than one app would. If the result sounds squashed, the source is already near maximum - there is nothing left to boost cleanly.
 
 When the boost stops - for any reason - the slider(s) are restored to their previous values, including a level you had set very low yourself: it is kept as it was, not reset to 100%.
@@ -62,6 +67,7 @@ multi-app uses the same restore path per target):
 | You press Stop / close the booster | Sliders restored instantly. Verified. |
 | A boosted app exits or crashes while boosting | That app's saved volume is restored. If other selected apps remain, boosting continues; if it was the last one, the booster stops. Verified for the single-app case: the app came back at its old volume on relaunch. |
 | The booster itself is killed hard (or PC loses power) mid-boost | Windows may persist the 4%. The booster leaves a note in `booster-state.txt`; the next time ANY copy of the booster runs (and every few seconds while one is open), it finds each ducked app (and system sounds, if that was the target) and repairs the slider to the saved value. The note itself is written atomically, so a kill landing *during* that write leaves the previous contents intact rather than a half-written file. Verified, including kills timed into the write. |
+| A slider cannot be put back when the boost stops (the audio service was restarted under the booster) | The window and the log say so instead of reporting success, and the note is kept: the next booster start repairs the slider. Tested with a simulated failure. |
 | Nothing else available | Just drag the slider(s) back up in the Volume Mixer - they are ordinary volume values, nothing is locked. |
 
 The booster never touches the registry, the PropertyStore, or anything else
@@ -69,18 +75,20 @@ this kit manages.
 
 ## Honest limitations
 
-- **Boost is per process (tree), not per tab/stream.** Boosting a browser boosts all of its tabs; Windows groups them into one audio session set.
+- **Boost is per app (its whole process tree), not per tab/stream.** Boosting a browser boosts all of its tabs; Windows groups them into one audio session set. Whether the browser plays from its main process (started with this kit's launch flags) or from a helper process (without them) makes no difference to the boost. The tests for this use a stand-in - a process that starts and replaces audio helpers - not a real browser.
+- **The quiet original is still there.** The app itself keeps playing at 4%: 28 dB below the boosted copy at 100%, 42 dB below at 500%, and ahead of it by the latency (about 60 ms, up to 160 ms after dropouts). With sharp sounds on headphones that can be heard as a faint pre-echo.
 - **The boosted copy plays on the default output.** Apps are ducked on every active output - the capture is not tied to one - but the louder copy always comes out of the default device, so boosting an app you route to headphones moves its sound to the default output while boosted. If the default output changes mid-boost, the booster stops safely - press Start again.
-- **If the audio output stops responding** (device removed, taken over in exclusive mode), the boost stops itself after about 2 seconds and says why, instead of leaving the app ducked and silent.
+- **If the audio output stops responding** (device removed, taken over in exclusive mode), the boost stops itself after about 2 seconds and says why, instead of leaving the app ducked and silent. The same goes for the captured app's stream: if it stops answering, the boost ends with "the captured app's audio stream stopped responding".
+- **An app that runs as administrator, boosted by a booster that does not:** Windows does not let the booster wait for such an app's exit. The booster used to take that refusal for the app having closed, and stopped at once with "target closed". It now looks at the app twice a second instead. This was tested with a simulated refusal only, not with a real app running as administrator.
 - **System sounds as their own target are best-effort.** The Volume Mixer entry has process id 0; there is no supported API to capture that session alone. The checkbox tries anyway. If Windows refuses, use **Boost all audio on this device**, which includes system sounds because it captures everything except the booster.
 - **Boost all audio ducks every session** on every active output, not only the apps you had checked. New apps that start making sound are ducked too, until you stop.
 - **Boost all audio never runs alongside another booster.** It captures everything except itself - which would include another booster's already-boosted output, boosting it a second time. So it refuses to start while another booster is playing, and while it runs, any other boost refuses to start.
-- **The booster will not boost an app it is running inside.** Per-app capture takes the target's whole process tree, so if you launch the booster *from* a program - a shell, a script, a terminal - and then boost that same program, it would capture its own boosted output, amplify it again, and run away into feedback at whatever the slider says. Double-clicking the exe is never affected, because its parent is Explorer. The case is detected before any audio starts and refused with an explanation; "Boost all audio" is immune either way, since it captures everything *except* the booster.
+- **The booster will not boost an app it is running inside.** Per-app capture takes the target's whole process tree, so if you launch the booster *from* a program - a shell, a script, a terminal - and then boost that same program, it would capture its own boosted output, amplify it again, and run away into feedback at whatever the slider says. Double-clicking the exe is never affected, because its parent is Explorer. The case is detected before any audio starts and refused with an explanation; "Boost all audio" is immune either way, since it captures everything *except* the booster. If the list of running processes cannot be read at all, a per-app boost refuses to start, because that check could then not be made.
 - **Protected (DRM) audio paths** may deliver silence to the capture API; if an app produces silence when boosted, that is why.
 - **Anti-cheat safe by construction**: nothing is injected into any process - the audio is read through a public OS API, same as OBS. Games cannot tell the difference.
 - **Unsigned exe**: SmartScreen or an antivirus may warn on first run - expected for any home-built exe. The full source sits next to it, and `Build-Booster.cmd` reproduces the exe from that source using only Windows' own compiler.
 - **Hardware care**: 500% is about 14 dB over what the system normally allows. On laptop speakers at full device volume this can sound bad or, on cheap speakers, damage them over time. Prefer boosting quiet content rather than everything. Start low and only go higher if the source is actually quiet. Boosting all audio at a high slider is the most aggressive setting this tool has.
-- Windows 10 version 2004 (build 19041) or newer required; runs as a 32-bit or a 64-bit process.
+- Needs Windows' process-loopback capture. Microsoft documents Windows 10 build 20348 as the minimum for it (this page used to say version 2004, build 19041); the booster has only ever been run on Windows 11 build 26100. It runs as a 32-bit or a 64-bit process.
 
 ## Command line (for scripts; the window appears when run with no arguments)
 
@@ -102,8 +110,8 @@ and writes a one-line result to `--log`.
 - `--boost` is clamped to 100-500, and the `--log` line reports the value actually applied rather than the one requested, so `--boost 5000` logs `boost=500`.
 - This is a windowless exe with no console, so `--log` is the only place any error can appear. It is resolved before the rest of the command line is parsed, so even an argument error still reaches the log file.
 - `--seconds` accepts 0-2147483 (0 = until the target closes); anything else is refused before the boost starts.
-- Exit codes: **0** success, **1** error (details in the log), **3** the log file cannot be written - checked before anything starts.
-- Besides the fields above, the log line reports `glitches` (audible dropouts, one per gap - each one also raises `latencyMs` by 20, to at most 160), `trimmedMs` (audio dropped to recover from a stall - 0 in normal use) and, when the window would show one, `warning=` (for example: a chosen app is muted).
+- Exit codes: **0** the boost ran - how it ended is in the log's `stopReason=`: `timer`, `target closed`, or the reason it stopped itself (a dead output, a changed output device). **1** an error before or at the start (details in the log). **3** the log file cannot be written - checked before anything starts.
+- Besides the fields above, the log line reports `glitches` (audible dropouts, one per gap - each one also raises `latencyMs` by 20, to at most 160), `trimmedMs` (audio dropped to recover from a stall - 0 in normal use), when the window would show one, `warning=` (for example: a chosen app is muted), and `restore=` if a slider could not be put back at the end.
 
 ## How this was verified (2026-08-23, this machine)
 
@@ -147,6 +155,43 @@ builds:
 Only a dropout that is actually heard is counted: a buffer found empty just in time (50 ms
 stalls against a 50 ms buffer) loses nothing and counts nothing.
 
+Audit pass 2026-09-30, after the report that a boost was sluggish to start and worked only
+some of the time with a Chromium browser. Each point has a test in `tests\booster` (named in
+brackets); the audio tests again used only the private near-silent test process.
+- The boost was tied to whichever process owned the audio session. In a browser started
+  without the kit's launch flags that is a helper process; when the browser replaced it, the
+  boost ended with "target closed" and the new helper was neither ducked nor boosted. The
+  boost now follows the app's main process (ChildTree).
+- The session-created callback never fired. The registration is armed only by enumerating
+  the sessions once through the same session manager, and that was not done, so new sessions
+  were left to the half-second poll. It is armed now, and measured with the poll taken out
+  (ChildTree). The "58 ms" quoted further down for 2026-09-20 was the poll arriving early.
+- A process the target started mid-boost was captured at once but not ducked until the next
+  rebuild of the process tree, up to 10 s later. It is placed in the tree on the spot now.
+- Start ran on the window's thread and froze the window for 0.5-2.5 s; a second click during
+  the freeze stopped the boost that had just started. Most of that wait was one WMI query
+  for the process tree (350-780 ms for the first one in a process). A Toolhelp snapshot
+  gives the same answer in about 3 ms, and Start no longer runs on the window's thread.
+- Every pass of the watcher asked for process names in a way that snapshots every process
+  and thread on the machine: 2-3 ms per name, several names per audio session, twice a
+  second. One name now takes about 0.03 ms (ProcessInfo).
+- A browser that was running but quiet was missing from the list, because Chromium closes
+  its audio session 5 s after the last sound. It is listed now.
+- Smaller ones: a refusal to wait on the target (an app running as administrator) counted
+  as "target closed" (HookDenied); an unreadable process list let the self-feedback guard
+  pass (NoProcessList); a failed slider restore was reported as success (RestoreFail); a
+  dead capture stream left the app ducked and silent (CaptureDeath); one app of several that
+  could not be captured stayed ducked (CaptureRefused); the crash note sat next to the exe
+  (ReadOnlyFolder); the boosted copy left an entry in the volume store for every folder it
+  was ever run from; and COM `bool` parameters were marshalled as 2-byte values.
+- The level of the boosted copy is a kept test now (Gain): at 100% an rms of 0.000864
+  against the test tone's 0.000863, at 200% twice that to three decimals.
+- The window was reworked the same day to be easier to read: numbered steps, apps by their
+  name and icon, a list that keeps itself up to date, the boost in words, status lines in
+  plain language, and purple instead of blue. UiRace covers its list and its status lines.
+- The exe in the kit had not been rebuilt since 2026-09-23 while its source was being fixed,
+  and no test could notice. The build test now compares the shipped exe with a fresh build.
+
 Fixed 2026-09-20: **per-app boost was not ducking anything at all.** The COM interop declared
 `IsSystemSoundsSession()` without `[PreserveSig]`, so .NET marshalled it as
 `HRESULT IsSystemSoundsSession([out,retval] int*)`. The real method takes no such pointer and
@@ -178,7 +223,8 @@ Verified after that pass by boosting a silent session and tracing its mixer volu
 `glitches=0` and precisely 6.01 s of audio captured. A session created *during* a boost was
 ducked 58 ms after it appeared, which exercises the session-notification callback - one of the
 two interfaces the program implements rather than calls, and the ones most at risk from a
-marshalling change.
+marshalling change. (Not so, as the 2026-09-30 audit found: the callback was not armed at the
+time, and those 58 ms were the half-second poll arriving early.)
 
 Added 2026-09-20: a guard against boosting a process tree that contains the booster itself.
 This was found the hard way, by doing it - the feedback is immediate and loud. The predicate
