@@ -12,7 +12,7 @@ installation. If you never run it, it does nothing.
 | `VolumeBooster\AppVolumeBooster.cs` | Complete source code, one file. |
 | `VolumeBooster\Build-Booster.cmd` | Rebuilds the exe using the C# compiler that ships inside Windows - works even on a freshly reinstalled machine with no tools. It compiles to a temporary file and only then replaces the exe, so a failed rebuild leaves the working binary you already had and exits non-zero instead of reporting success. |
 | `%LocalAppData%\AppVolumeBooster\booster-state.txt` | Appears only while a boost is active (crash-recovery data, see below). Deleted automatically. There is one per Windows user, shared by every copy of the exe, wherever a copy sits - a read-only folder included. Written through a temporary file and an atomic replace, so killing the booster during the write cannot leave it truncated. (Only if that folder cannot be used does the note go next to the exe, and failing that to `%TEMP%`.) |
-| `%LocalAppData%\AppVolumeBooster\settings.txt` | Exists only if you switched **Auto-refresh** off (one line). Switching it back on removes the file. |
+| `%LocalAppData%\AppVolumeBooster\settings.txt` | What the window remembers: the app of your last boost (for **Start boost** in the tray), whether you switched **Auto-refresh** off, and that the "still running in the tray" notice was shown once. One short line each; there is no file until one of them is set. |
 
 ## How to use it
 
@@ -22,9 +22,11 @@ installation. If you never run it, it does nothing.
 4. Optional:
    - **Also boost Windows system sounds** - beeps and notifications, without touching other apps. Windows does not give this mixer entry a real process; if capture fails, the status line says so and the reliable alternative is the next box.
    - **Boost all audio on this device** - boost everything on the default output, including Windows system sounds. The app list is ignored while this is checked.
-5. Keep the booster window open while you need the boost. Press **Stop boost** or close the window to return everything to normal.
+5. Keep the booster running while you need the boost - in its window, or in the tray (below). Press **Stop boost** or close the window to return everything to normal.
 
 The line under the button says in plain words what is going on - *Boosting Thorium at 150%*, *Waiting - no sound from Thorium yet*, *Stopped: the app was closed* - and the smaller line below it gives the details. Under the slider the window says what the number means (*1.5 times the normal volume*).
+
+**In the tray.** Minimising the window puts the booster in the notification area instead of the taskbar - a boost keeps running there. The icon is purple with sound waves while a boost runs and grey while it does not. Click the icon to bring the window back. Right-click it for a small panel with the boost's slider and **Start boost** / **Stop boost**, plus **Open window** and **Exit**. A Start from the panel boosts what is checked in the window; with nothing checked, it takes the app you boosted last time if it is running, or else the app that is playing sound right now - one app, never a guess at several - and the panel says which before you press it. On Windows 11 a new tray icon starts out in the hidden part of the tray (the ^ arrow); drag it onto the taskbar to keep it in sight. If a boost ends by itself while the window is in the tray (the app was closed), a notification says so. Starting `AppVolumeBooster.exe` again while it is in the tray brings that window back rather than opening a second booster (the command line is not affected).
 
 One instance can boost several apps at once. If one of those apps closes, the others keep boosting; the booster stops when the last selected app is gone (unless you are boosting all audio or system sounds alone).
 
@@ -189,6 +191,8 @@ brackets); the audio tests again used only the private near-silent test process.
 - The window was reworked the same day to be easier to read: numbered steps, apps by their
   name and icon, a list that keeps itself up to date, the boost in words, status lines in
   plain language, and purple instead of blue. UiRace covers its list and its status lines.
+- Added 2026-10-20: the tray (minimise to the notification area, a right-click panel with the
+  slider and Start/Stop, the last boosted app remembered). UiRace covers it too.
 - The exe in the kit had not been rebuilt since 2026-09-23 while its source was being fixed,
   and no test could notice. The build test now compares the shipped exe with a fresh build.
 

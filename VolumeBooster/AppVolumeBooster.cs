@@ -331,6 +331,30 @@ namespace AppVolumeBoosterNs
             catch { }
         }
 
+        // Rounded corners and a border in the window's own colour, for the tray panel.
+        // Windows 11 only; older versions ignore both attributes.
+        public static void UseRoundCorners(IntPtr hwnd, Color border)
+        {
+            if (hwnd == IntPtr.Zero) return;
+            int round = 2;                                             // DWMWCP_ROUND
+            int colour = border.R | (border.G << 8) | (border.B << 16); // COLORREF
+            try
+            {
+                DwmSetWindowAttribute(hwnd, 33, ref round, 4);          // DWMWA_WINDOW_CORNER_PREFERENCE
+                DwmSetWindowAttribute(hwnd, 34, ref colour, 4);         // DWMWA_BORDER_COLOR
+            }
+            catch { }
+        }
+
+        [DllImport("user32.dll")]
+        public static extern bool DestroyIcon(IntPtr h);
+
+        [DllImport("user32.dll")]
+        public static extern bool SetForegroundWindow(IntPtr h);
+
+        [DllImport("user32.dll")]
+        public static extern bool AllowSetForegroundWindow(int pid);
+
         public static readonly Guid IID_IAudioClient = new Guid("1CB9AD4C-DBFA-4c32-B178-C2F568A703B2");
         public static readonly Guid IID_IAudioSessionManager2 = new Guid("77AA99A0-1BD6-484F-8BC7-2C654C9A9B6F");
         public static readonly Guid IID_IAudioCaptureClient = new Guid("C8ADBD64-E71E-48a0-A4DE-185C395CD317");
@@ -2116,6 +2140,52 @@ namespace AppVolumeBoosterNs
             return p;
         }
 
+        // The app's icon, drawn rather than shipped (the exe is one .cs file): a speaker on a
+        // rounded square - purple with sound waves while a boost runs, grey without them while
+        // it does not. The window and the tray icon use it.
+        public static Bitmap AppGlyph(int size, bool on)
+        {
+            Bitmap b = new Bitmap(size, size, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            using (Graphics g = Graphics.FromImage(b))
+            {
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+                g.Clear(Color.Transparent);
+                float s = size / 16f;
+                using (System.Drawing.Drawing2D.GraphicsPath p = Round(new RectangleF(0.5f * s, 0.5f * s, 15f * s, 15f * s), 3.5f * s))
+                using (SolidBrush bg = new SolidBrush(on ? Accent : Color.FromArgb(78, 76, 94)))
+                    g.FillPath(bg, p);
+                Color ink = on ? Color.White : Color.FromArgb(214, 212, 226);
+                using (SolidBrush fg = new SolidBrush(ink))
+                    g.FillPolygon(fg, new PointF[] {
+                        new PointF(3f * s, 6f * s), new PointF(5.5f * s, 6f * s), new PointF(8.6f * s, 3.2f * s),
+                        new PointF(8.6f * s, 12.8f * s), new PointF(5.5f * s, 10f * s), new PointF(3f * s, 10f * s) });
+                if (on)
+                {
+                    using (Pen w = new Pen(ink, Math.Max(1.1f, 1.25f * s)))
+                    {
+                        w.StartCap = System.Drawing.Drawing2D.LineCap.Round;
+                        w.EndCap = System.Drawing.Drawing2D.LineCap.Round;
+                        g.DrawArc(w, 8.6f * s - 2.5f * s, 8f * s - 2.5f * s, 5f * s, 5f * s, -50, 100);
+                        g.DrawArc(w, 8.6f * s - 4.6f * s, 8f * s - 4.6f * s, 9.2f * s, 9.2f * s, -48, 96);
+                    }
+                }
+            }
+            return b;
+        }
+
+        // An Icon made of such a picture. Its handle goes on the list, for DestroyIcon once the
+        // window is gone (Icon.FromHandle does not free it).
+        public static Icon ToIcon(Bitmap b, List<IntPtr> handles)
+        {
+            using (b)
+            {
+                IntPtr h = b.GetHicon();
+                handles.Add(h);
+                return Icon.FromHandle(h);
+            }
+        }
+
         // The box of a list row or of an option: purple with a white mark when it is on.
         public static void CheckGlyph(Graphics g, RectangleF box, bool on, bool enabled, bool focus, Color empty)
         {
@@ -2540,9 +2610,14 @@ namespace AppVolumeBoosterNs
         protected override void OnLostFocus(EventArgs e) { Invalidate(); base.OnLostFocus(e); }
     }
 
-    // The one thing the window remembers between runs: whether the list refreshes itself.
-    // On is the default and leaves no file; switching it off writes a one-line settings.txt
-    // next to the crash note (%LocalAppData%\AppVolumeBooster), switching it on removes it.
+    // What the window remembers between runs, in settings.txt next to the crash note
+    // (%LocalAppData%\AppVolumeBooster): one "name=value" line for each setting that is not
+    // at its default - with all of them at their defaults there is no file. It is written only
+    // on the user's own actions: a click on Auto-refresh, a boost that starts, the first trip
+    // to the tray.
+    //   autorefresh=0      the list changes only when Refresh is pressed
+    //   last=name|name     the apps (process names) of the last boost, for Start in the tray
+    //   trayhint=1         the "still running in the tray" notice has been shown once
     internal static class Settings
     {
         static string PathOf()
@@ -2551,31 +2626,217 @@ namespace AppVolumeBoosterNs
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AppVolumeBooster"), "settings.txt");
         }
 
+        static Dictionary<string, string> Load()
+        {
+            Dictionary<string, string> d = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                string p = PathOf();
+                if (!File.Exists(p)) return d;
+                foreach (string line in File.ReadAllLines(p))
+                {
+                    int eq = line.IndexOf('=');
+                    if (eq > 0) d[line.Substring(0, eq).Trim()] = line.Substring(eq + 1).Trim();
+                }
+            }
+            catch { }
+            return d;
+        }
+
+        static string Get(string key, string def)
+        {
+            string v;
+            return Load().TryGetValue(key, out v) ? v : def;
+        }
+
+        static void Set(string key, string value, string def)
+        {
+            try
+            {
+                Dictionary<string, string> d = Load();
+                if (value == def) d.Remove(key); else d[key] = value;
+                string p = PathOf();
+                if (d.Count == 0) { if (File.Exists(p)) File.Delete(p); return; }
+                Directory.CreateDirectory(System.IO.Path.GetDirectoryName(p));
+                List<string> lines = new List<string>();
+                foreach (KeyValuePair<string, string> kv in d) lines.Add(kv.Key + "=" + kv.Value);
+                File.WriteAllLines(p, lines.ToArray());
+            }
+            catch { }
+        }
+
         public static bool AutoRefresh
+        {
+            get { return Get("autorefresh", "1") != "0"; }
+            set { Set("autorefresh", value ? "1" : "0", "1"); }
+        }
+
+        // "|" because it is the one character that cannot be in a file name
+        public static string[] LastApps
+        {
+            get { return Get("last", "").Split(new char[] { '|' }, StringSplitOptions.RemoveEmptyEntries); }
+            set { Set("last", value == null ? "" : string.Join("|", value), ""); }
+        }
+
+        public static bool TrayHintShown
+        {
+            get { return Get("trayhint", "0") == "1"; }
+            set { Set("trayhint", value ? "1" : "0", "0"); }
+        }
+    }
+
+    // What a right-click on the tray icon opens: the boost, its slider and Start/Stop, without
+    // the window. It closes when it loses the focus, or on Esc.
+    internal class TrayPopup : Form
+    {
+        readonly MainForm main;
+        internal readonly Badge Dot = new Badge();
+        internal readonly Label State = new Label();
+        internal readonly Label Pct = new Label();
+        internal readonly DarkSlider Slider = new DarkSlider();
+        internal readonly Button Go = new Button();
+        internal readonly Label What = new Label();
+        readonly Button openBtn = new Button();
+        readonly Button exitBtn = new Button();
+        int styled = -1;   // which colours Go has: 0 purple (Start), 1 red (Stop)
+
+        public TrayPopup(MainForm owner)
+        {
+            main = owner;
+            AutoScaleMode = AutoScaleMode.Dpi;
+            AutoScaleDimensions = new SizeF(96f, 96f);
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            TopMost = true;
+            StartPosition = FormStartPosition.Manual;
+            Text = "App Volume Booster";
+            ClientSize = new Size(300, 296);
+            Font = new Font("Segoe UI", 10f);
+            BackColor = Theme.Bg;
+            ForeColor = Theme.Text;
+
+            PictureBox logo = new PictureBox();
+            logo.Image = Theme.AppGlyph(20, true);
+            logo.SizeMode = PictureBoxSizeMode.Zoom;
+            logo.SetBounds(16, 14, 20, 20);
+            logo.BackColor = Theme.Bg;
+            Label title = new Label();
+            title.Text = "App Volume Booster";
+            title.Font = MainForm.Semibold(10.5f);
+            title.SetBounds(42, 12, 242, 24);
+            title.TextAlign = ContentAlignment.MiddleLeft;
+            title.BackColor = Theme.Bg;
+            title.ForeColor = Theme.Text;
+
+            Dot.SetBounds(17, 51, 10, 10);
+            Dot.Fill = Theme.Dim;
+            State.SetBounds(34, 44, 250, 24);
+            State.AutoEllipsis = true;
+            State.TextAlign = ContentAlignment.MiddleLeft;
+            State.BackColor = Theme.Bg;
+            State.ForeColor = Theme.Text;
+
+            Label how = new Label();
+            how.Text = "How loud?";
+            how.Font = new Font("Segoe UI", 9.5f);
+            how.SetBounds(16, 84, 140, 24);
+            how.TextAlign = ContentAlignment.MiddleLeft;
+            how.BackColor = Theme.Bg;
+            how.ForeColor = Theme.Muted;
+            Pct.Font = MainForm.Semibold(17f);
+            Pct.TextAlign = ContentAlignment.MiddleRight;
+            Pct.SetBounds(150, 74, 136, 38);
+            Pct.BackColor = Theme.Bg;
+            Pct.ForeColor = Theme.AccentLight;
+
+            Slider.Minimum = 100; Slider.Maximum = (int)(BoostEngine.MAXBOOST * 100);
+            Slider.SetBounds(6, 114, 288, 58);
+            Slider.ValueChanged += delegate { Pct.Text = Slider.Value + "%"; main.SetBoostFromTray(Slider.Value); };
+
+            Go.Text = "Start boost";
+            Go.Font = MainForm.Semibold(11f);
+            Go.SetBounds(16, 180, 268, 40);
+            Go.Click += delegate { main.TrayToggle(); };
+
+            What.Font = new Font("Segoe UI", 9f);
+            What.SetBounds(16, 224, 268, 32);
+            What.BackColor = Theme.Bg;
+            What.ForeColor = Theme.Muted;
+
+            openBtn.Text = "Open window";
+            openBtn.Font = new Font("Segoe UI", 9f);
+            openBtn.SetBounds(16, 258, 130, 28);
+            Theme.Button(openBtn, Theme.Surface, Theme.SurfaceHot);
+            openBtn.Click += delegate { main.RestoreFromTray(); };
+            exitBtn.Text = "Exit";
+            exitBtn.Font = new Font("Segoe UI", 9f);
+            exitBtn.SetBounds(154, 258, 130, 28);
+            Theme.Button(exitBtn, Theme.Surface, Theme.SurfaceHot);
+            exitBtn.Click += delegate { Hide(); main.Close(); };
+
+            Controls.Add(logo);
+            Controls.Add(title);
+            Controls.Add(Dot);
+            Controls.Add(State);
+            Controls.Add(how);
+            Controls.Add(Pct);
+            Controls.Add(Slider);
+            Controls.Add(Go);
+            Controls.Add(What);
+            Controls.Add(openBtn);
+            Controls.Add(exitBtn);
+            Slider.TabIndex = 0; Go.TabIndex = 1; openBtn.TabIndex = 2; exitBtn.TabIndex = 3;
+        }
+
+        protected override CreateParams CreateParams
         {
             get
             {
-                try
-                {
-                    string p = PathOf();
-                    return !(File.Exists(p) && File.ReadAllText(p).IndexOf("autorefresh=0", StringComparison.OrdinalIgnoreCase) >= 0);
-                }
-                catch { return true; }
+                CreateParams cp = base.CreateParams;
+                cp.ClassStyle |= 0x00020000;   // CS_DROPSHADOW
+                return cp;
             }
-            set
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            Native.UseRoundCorners(Handle, Theme.Border);
+        }
+
+        protected override void OnDeactivate(EventArgs e) { base.OnDeactivate(e); Hide(); }
+
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            if (keyData == Keys.Escape) { Hide(); return true; }
+            return base.ProcessCmdKey(ref msg, keyData);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            using (Pen p = new Pen(Theme.Border))
+                e.Graphics.DrawRectangle(p, 0, 0, ClientSize.Width - 1, ClientSize.Height - 1);
+        }
+
+        // Shows what the window shows: on = a boost runs, busy = it is starting, canStart =
+        // there is something Start would boost.
+        internal void Sync(bool on, bool busy, Color dot, string state, string what, bool canStart, int value)
+        {
+            Dot.Fill = dot;
+            if (State.Text != state) State.Text = state;
+            if (What.Text != what) What.Text = what;
+            string go = busy ? "Starting..." : (on ? "Stop boost" : "Start boost");
+            if (Go.Text != go) Go.Text = go;
+            Go.Enabled = !busy && (on || canStart);
+            int want = on ? 1 : 0;
+            if (want != styled)
             {
-                try
-                {
-                    string p = PathOf();
-                    if (value) { if (File.Exists(p)) File.Delete(p); }
-                    else
-                    {
-                        Directory.CreateDirectory(System.IO.Path.GetDirectoryName(p));
-                        File.WriteAllText(p, "autorefresh=0\r\n");
-                    }
-                }
-                catch { }
+                styled = want;
+                if (on) Theme.Button(Go, Theme.Stop, Theme.StopHot); else Theme.Button(Go, Theme.Accent, Theme.AccentHot);
             }
+            if (Slider.Value != value) Slider.Value = value;   // its ValueChanged sets the window's slider, which has it already
+            Pct.Text = Slider.Value + "%";
         }
     }
 
@@ -2603,10 +2864,16 @@ namespace AppVolumeBoosterNs
         int tickN;
         int hint;                 // 1 = the "what to do" line is showing, 2 = the "no app yet" line
         string boostWhat = "";    // the chosen apps by name, for the status line
+        string[] chosenNames = new string[0];   // the process names of the boost being started
+        NotifyIcon tray = new NotifyIcon();
+        TrayPopup popup;
+        Icon trayOn, trayOff;
+        bool trayIsOn;
+        readonly List<IntPtr> iconHandles = new List<IntPtr>();
 
         const string ReadyLine = "Choose an app, set how loud, then press Start boost.";
 
-        static Font Semibold(float size)
+        internal static Font Semibold(float size)
         {
             Font f = new Font("Segoe UI Semibold", size);
             if (f.Name != "Segoe UI Semibold") { f.Dispose(); f = new Font("Segoe UI", size, FontStyle.Bold); }
@@ -2647,6 +2914,24 @@ namespace AppVolumeBoosterNs
             Font = new Font("Segoe UI", 10f);
             BackColor = Theme.Bg;
             ForeColor = Theme.Text;
+
+            // ---- the tray ----
+            // Minimised, the window goes to the notification area instead of the taskbar. A
+            // click on its icon brings the window back; a right-click opens a small panel with
+            // the boost's slider and Start/Stop (TrayPopup).
+            int small = SystemInformation.SmallIconSize.Width;
+            trayOn = Theme.ToIcon(Theme.AppGlyph(small, true), iconHandles);
+            trayOff = Theme.ToIcon(Theme.AppGlyph(small, false), iconHandles);
+            Icon = Theme.ToIcon(Theme.AppGlyph(SystemInformation.IconSize.Width, true), iconHandles);
+            tray.Icon = trayOff;
+            tray.Text = "App Volume Booster - not boosting";
+            tray.MouseUp += delegate(object s, MouseEventArgs e)
+            {
+                if (e.Button == MouseButtons.Right) ShowPopup();
+                else if (e.Button == MouseButtons.Left) RestoreFromTray();
+            };
+            tray.BalloonTipClicked += delegate { RestoreFromTray(); };
+            Resize += delegate { if (WindowState == FormWindowState.Minimized && Visible) ToTray(); };
 
             // ---- 1: what ----
             Badge one = Step("1", 20, 16);
@@ -2704,6 +2989,7 @@ namespace AppVolumeBoosterNs
             {
                 ShowBoost();
                 if (engine != null && !engine.Stopped) { engine.SetBoost(slider.Value); UpdateStatus(); }
+                SyncTray();
             };
 
             boostHint.SetBounds(20, 422, 460, 22);
@@ -2803,6 +3089,7 @@ namespace AppVolumeBoosterNs
             statusDot.Fill = dot;
             status.Text = headline;
             detail.Text = more ?? "";
+            SyncTray();
         }
 
         void SayReady()
@@ -3081,6 +3368,7 @@ namespace AppVolumeBoosterNs
                 return;
             }
             boostWhat = CheckedTitles(all, sys);
+            chosenNames = all ? new string[0] : CheckedNames();
             BoostEngine mine;
             try { mine = new BoostEngine(pids, slider.Value, all, sys); }
             catch (Exception ex)
@@ -3107,6 +3395,12 @@ namespace AppVolumeBoosterNs
                         // is playing sound yet", which used to overwrite the reason
                         FillSessions();
                         SayStopped(mine.StopReason, mine.RestoreWarning);
+                        // with the window in the tray nothing else would show that it ended
+                        if (tray.Visible && !Visible && mine.StopReason != "")
+                        {
+                            string r = Friendly(mine.StopReason);
+                            tray.ShowBalloonTip(5000, "Boost stopped", char.ToUpperInvariant(r[0]) + r.Substring(1) + ".", ToolTipIcon.None);
+                        }
                     });
                 }
                 catch { }
@@ -3141,6 +3435,8 @@ namespace AppVolumeBoosterNs
                             return;
                         }
                         if (mine.Stopped) return;
+                        // remembered for Start in the tray, which takes these when nothing is chosen
+                        if (chosenNames.Length > 0) Settings.LastApps = chosenNames;
                         startBtn.Text = "Stop boost";
                         StyleActionButton(true);
                         UpdateStatus();
@@ -3151,6 +3447,169 @@ namespace AppVolumeBoosterNs
         }
 
         bool starting;
+
+        string[] CheckedNames()
+        {
+            List<string> r = new List<string>();
+            for (int i = 0; i < list.Items.Count && i < listNames.Count; i++)
+                if (list.GetItemChecked(i) && !r.Contains(listNames[i])) r.Add(listNames[i]);
+            return r.ToArray();
+        }
+
+        // ---- the tray ----
+        internal void ToTray()
+        {
+            if (popup != null) popup.Hide();
+            Hide();
+            tray.Visible = true;
+            SyncTray();
+            if (!Settings.TrayHintShown)
+            {
+                // once: on Windows 11 a new tray icon starts out in the hidden part of the tray
+                Settings.TrayHintShown = true;
+                tray.ShowBalloonTip(6000, "App Volume Booster is still running",
+                    "It is in the notification area now. Right-click its icon to change the boost; click it to open the window.", ToolTipIcon.None);
+            }
+        }
+
+        internal void RestoreFromTray()
+        {
+            if (popup != null) popup.Hide();
+            Show();
+            WindowState = FormWindowState.Normal;
+            tray.Visible = false;
+            Activate();
+            Native.SetForegroundWindow(Handle);
+        }
+
+        void ShowPopup()
+        {
+            if (popup == null) popup = new TrayPopup(this);
+            // the list does not refresh itself while the window is in the tray: brought up to
+            // date here, so that what the panel offers to boost is what is running now
+            if (engine == null && !starting) RefreshList(true);
+            SyncTray();
+            Point c = Cursor.Position;
+            Rectangle wa = Screen.FromPoint(c).WorkingArea;
+            int x = Math.Max(wa.Left, Math.Min(c.X - popup.Width / 2, wa.Right - popup.Width));
+            int y = c.Y - popup.Height - 8;
+            if (y < wa.Top) y = c.Y + 8;   // a taskbar at the top of the screen
+            y = Math.Max(wa.Top, Math.Min(y, wa.Bottom - popup.Height));
+            popup.Location = new Point(x, y);
+            popup.Show();
+            popup.Activate();
+            Native.SetForegroundWindow(popup.Handle);
+        }
+
+        internal void SetBoostFromTray(int v) { if (slider.Value != v) slider.Value = v; }
+
+        // Start or Stop in the tray panel.
+        internal void TrayToggle()
+        {
+            if (starting) return;
+            if (engine == null && !PrepareTrayBoost()) return;
+            ToggleBoost();
+        }
+
+        // Puts the checks a Start in the tray uses, and says whether there is anything to boost.
+        // What is chosen in the window counts; with nothing chosen, TrayPick decides.
+        bool PrepareTrayBoost()
+        {
+            RefreshList(true);
+            if (chkAll.Checked || chkSys.Checked || CheckedPids().Count > 0) return true;
+            string why;
+            List<int> pick = TrayPick(Entries(), Settings.LastApps, out why);
+            if (pick.Count == 0)
+            {
+                Say(Theme.Warn, "Nothing to boost yet.", "Start some music or a video first, or open the window and choose an app.");
+                return false;
+            }
+            foreach (int i in pick) list.SetItemChecked(i, true);
+            return true;
+        }
+
+        List<AppEntry> Entries()
+        {
+            List<AppEntry> r = new List<AppEntry>();
+            foreach (object o in list.Items) r.Add(o as AppEntry);
+            return r;
+        }
+
+        // Which rows a Start in the tray takes when nothing is chosen: every app of the last
+        // boost that is in the list (its playing row, if it has several), or - with none of
+        // them there - the first app that is playing. Only that one: a guess stays small.
+        internal static List<int> TrayPick(List<AppEntry> rows, string[] last, out string why)
+        {
+            List<int> r = new List<int>();
+            why = "";
+            foreach (string name in last ?? new string[0])
+            {
+                int best = -1;
+                for (int i = 0; i < rows.Count; i++)
+                {
+                    AppEntry a = rows[i];
+                    if (a == null || !string.Equals(a.Name, name, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (best < 0 || (a.Playing && !rows[best].Playing)) best = i;
+                }
+                if (best >= 0 && !r.Contains(best)) r.Add(best);
+            }
+            if (r.Count > 0) { why = "boosted last time"; return r; }
+            for (int i = 0; i < rows.Count; i++)
+                if (rows[i] != null && rows[i].Playing) { r.Add(i); why = "playing now"; break; }
+            return r;
+        }
+
+        // What Start in the tray panel would boost, in words.
+        string TrayPreview(out bool can)
+        {
+            can = true;
+            if (chkAll.Checked) return "Start boosts all audio, as chosen in the window.";
+            if (chkSys.Checked || CheckedPids().Count > 0)
+                return "Start boosts " + CheckedTitles(false, chkSys.Checked) + ", as chosen in the window.";
+            string why;
+            List<int> pick = TrayPick(Entries(), Settings.LastApps, out why);
+            if (pick.Count == 0) { can = false; return "Nothing is playing. Start some music or a video, or open the window."; }
+            List<string> names = new List<string>();
+            foreach (int i in pick)
+            {
+                AppEntry a = (AppEntry)list.Items[i];
+                if (!names.Contains(a.Title)) names.Add(a.Title);
+            }
+            return "Start boosts " + string.Join(" and ", names.ToArray()) + " - " + why + ".";
+        }
+
+        // The tray icon, its tooltip and the panel follow the window.
+        void SyncTray()
+        {
+            if (trayOn == null) return;   // the window is still being built
+            bool on = engine != null && !engine.Stopped && !starting;
+            if (on != trayIsOn) { tray.Icon = on ? trayOn : trayOff; trayIsOn = on; }
+            string tip = on ? status.Text : "App Volume Booster - not boosting";
+            if (tip.Length > 63) tip = tip.Substring(0, 60) + "...";   // NotifyIcon refuses more than 63
+            if (tray.Text != tip) tray.Text = tip;
+            if (popup == null) return;
+            bool idle = engine == null && !starting;
+            // the window's "what to do" lines speak of its list and buttons: the panel says less
+            string state = (idle && hint != 0) ? "Not boosting" : status.Text;
+            bool can = true;
+            string what = idle ? TrayPreview(out can) : "The slider changes the boost at once.";
+            popup.Sync(engine != null && !starting, starting, statusDot.Fill, state, what, can, slider.Value);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                try { tray.Visible = false; tray.Dispose(); } catch { }
+                if (popup != null) { try { popup.Dispose(); } catch { } popup = null; }
+            }
+            base.Dispose(disposing);
+            if (disposing)
+            {
+                foreach (IntPtr h in iconHandles) Native.DestroyIcon(h);
+                iconHandles.Clear();
+            }
+        }
 
         // why == null: the user pressed Stop. Otherwise the boost ended by itself, and says why.
         void SayStopped(string why, string restoreWarning)
@@ -3200,6 +3659,54 @@ namespace AppVolumeBoosterNs
         }
     }
 
+    // One booster window per Windows session. Starting the exe again while its window is
+    // open - in the tray, or behind other windows - brings that window back instead of
+    // opening a second one: in the tray it was easy to forget, and a second window meant a
+    // second booster. The command line is not affected; scripts run as many as they like.
+    internal static class SingleWindow
+    {
+        public const string Name = "AppVolumeBooster.Window";
+        static Mutex held;               // kept for the life of the window
+        static EventWaitHandle asked;    // set by a later start: "show yourself"
+
+        // True when this process is now THE window. False when another one is, and was asked
+        // to show itself. When that one cannot be asked (another user's, or one running at
+        // another integrity level), this start opens a window of its own as before.
+        public static bool Claim(string name)
+        {
+            bool createdNew;
+            Mutex m;
+            try { m = new Mutex(false, "Local\\" + name, out createdNew); }
+            catch { return true; }
+            if (createdNew) { held = m; return true; }
+            m.Close();
+            try
+            {
+                EventWaitHandle ev;
+                if (!EventWaitHandle.TryOpenExisting("Local\\" + name + ".Show", out ev)) return true;
+                using (ev)
+                {
+                    // this start is the one the user just made, so it may hand the foreground on
+                    Native.AllowSetForegroundWindow(-1);   // ASFW_ANY
+                    ev.Set();
+                }
+                return false;
+            }
+            catch { return true; }
+        }
+
+        // Calls show (on a thread-pool thread) each time a later start asks for the window.
+        public static void Listen(string name, ThreadStart show)
+        {
+            try
+            {
+                asked = new EventWaitHandle(false, EventResetMode.AutoReset, "Local\\" + name + ".Show");
+                ThreadPool.RegisterWaitForSingleObject(asked, delegate { show(); }, null, -1, false);
+            }
+            catch { }
+        }
+    }
+
     // ==================================== entry ======================================
     internal static class Program
     {
@@ -3211,9 +3718,21 @@ namespace AppVolumeBoosterNs
 
             if (args.Length > 0) return CliMain(args);
 
+            // a window is open already: it has been asked to come back, and this start ends here
+            if (!SingleWindow.Claim(SingleWindow.Name)) return 0;
+            MainForm form = null;
+            SingleWindow.Listen(SingleWindow.Name, delegate
+            {
+                MainForm f = form;
+                if (f == null) return;
+                try { f.BeginInvoke((MethodInvoker)delegate { f.RestoreFromTray(); }); }
+                catch { }   // not shown yet, or closing
+            });
+
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new MainForm());
+            form = new MainForm();
+            Application.Run(form);
             return 0;
         }
 

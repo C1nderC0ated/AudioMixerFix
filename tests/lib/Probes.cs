@@ -20,7 +20,13 @@ namespace AppVolumeBoosterNs
     //                                      "pid|parent|name" for each one running, "ask|pid|name"
     //                                      for each pid asked about, and how long both lookups take
     //   sleep <ms>                         just stay alive that long
-    //   shot  <out.png> [idle|boosting|waiting|empty]
+    //   claim <name> <ms> <out>            SingleWindow.Claim under a test name. First: writes
+    //                                      "claimed", listens <ms> long, then "first shown=<n>"
+    //                                      (n = how often a later start asked it to show).
+    //                                      Not first: writes "second" at once. No window either way.
+    //   shot  <out.png> [idle|boosting|waiting|empty|tray|tray-on]
+    //                                      (tray, tray-on: the panel a right-click on the tray
+    //                                      icon opens, with made-up text)
     //                                      a picture of the booster's window, shown far off
     //                                      screen. With a look given, the list holds stand-in
     //                                      rows and the window is dressed as in that state;
@@ -67,6 +73,16 @@ namespace AppVolumeBoosterNs
                 return 0;
             }
             if (mode == "sleep") { Thread.Sleep(int.Parse(a[1], CultureInfo.InvariantCulture)); return 0; }
+            if (mode == "claim")
+            {
+                if (!SingleWindow.Claim(a[1])) { File.WriteAllText(a[3], "second"); return 0; }
+                int shown = 0;
+                SingleWindow.Listen(a[1], delegate { Interlocked.Increment(ref shown); });
+                File.WriteAllText(a[3], "claimed");
+                Thread.Sleep(int.Parse(a[2], CultureInfo.InvariantCulture));
+                File.WriteAllText(a[3], "first shown=" + shown);
+                return 0;
+            }
             if (mode == "procs")
             {
                 StringBuilder sb = new StringBuilder();
@@ -149,11 +165,23 @@ namespace AppVolumeBoosterNs
                     list.Invalidate();
                     for (int i = 0; i < 20; i++) { System.Windows.Forms.Application.DoEvents(); Thread.Sleep(10); }
                 }
-                using (System.Drawing.Bitmap bmp = new System.Drawing.Bitmap(f.Width, f.Height))
+                System.Windows.Forms.Form pic = f;
+                if (look == "tray" || look == "tray-on")
                 {
-                    f.DrawToBitmap(bmp, new System.Drawing.Rectangle(0, 0, f.Width, f.Height));
+                    TrayPopup pop = new TrayPopup(f);
+                    pop.Location = new System.Drawing.Point(-4000, -4000);
+                    pop.Show();
+                    if (look == "tray") pop.Sync(false, false, Theme.Dim, "Not boosting", "Start boosts Thorium - boosted last time.", true, 150);
+                    else pop.Sync(true, false, Theme.AccentLight, "Boosting Thorium at 150%", "The slider changes the boost at once.", true, 150);
+                    for (int i = 0; i < 20; i++) { System.Windows.Forms.Application.DoEvents(); Thread.Sleep(10); }
+                    pic = pop;
+                }
+                using (System.Drawing.Bitmap bmp = new System.Drawing.Bitmap(pic.Width, pic.Height))
+                {
+                    pic.DrawToBitmap(bmp, new System.Drawing.Rectangle(0, 0, pic.Width, pic.Height));
                     bmp.Save(a[1], System.Drawing.Imaging.ImageFormat.Png);
                 }
+                if (!object.ReferenceEquals(pic, f)) pic.Close();
                 f.Close();
                 return 0;
             }

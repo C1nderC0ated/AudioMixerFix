@@ -13,6 +13,8 @@
 #     the user's real one. It is read when this file is loaded and put back exactly as it
 #     was by Complete-Test, so no test can leave a line there for a later self-heal to act
 #     on. (Do not run the audio tests while you are boosting something yourself.)
+#     settings.txt beside it gets the same: a boost started in the window writes the app it
+#     boosted there, as the one a Start in the tray takes next time.
 #
 #   Build-Rig [<source>]      compile the booster (warning level 4) and the probe from the
 #                             source under test into a fresh scratch folder, $Rig.Dir
@@ -33,9 +35,13 @@ $script:NoteDir = Join-Path $env:LOCALAPPDATA 'AppVolumeBooster'
 $script:NoteFile = Join-Path $script:NoteDir 'booster-state.txt'
 $script:NoteDirExisted = Test-Path -LiteralPath $script:NoteDir
 $script:NoteBefore = if (Test-Path -LiteralPath $script:NoteFile) { [IO.File]::ReadAllText($script:NoteFile) } else { $null }
+$script:SettingsFile = Join-Path $script:NoteDir 'settings.txt'
+$script:SettingsBefore = if (Test-Path -LiteralPath $script:SettingsFile) { [IO.File]::ReadAllText($script:SettingsFile) } else { $null }
 $script:Cleanups.Add({
     if ($null -ne $script:NoteBefore) { [IO.File]::WriteAllText($script:NoteFile, $script:NoteBefore) }
     elseif (Test-Path -LiteralPath $script:NoteFile) { Remove-Item -LiteralPath $script:NoteFile -Force }
+    if ($null -ne $script:SettingsBefore) { [IO.File]::WriteAllText($script:SettingsFile, $script:SettingsBefore) }
+    elseif (Test-Path -LiteralPath $script:SettingsFile) { Remove-Item -LiteralPath $script:SettingsFile -Force }
     if (-not $script:NoteDirExisted -and (Test-Path -LiteralPath $script:NoteDir) -and -not (Get-ChildItem -LiteralPath $script:NoteDir -Force)) { Remove-Item -LiteralPath $script:NoteDir }
 })
 

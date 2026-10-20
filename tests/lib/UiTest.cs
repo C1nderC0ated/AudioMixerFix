@@ -10,7 +10,8 @@ using System.Windows.Forms;
 namespace AppVolumeBoosterNs
 {
     // Drives the real MainForm (via reflection): first its app list, then the stop/start
-    // race, using real engines on private near-silent player processes - never on any real app.
+    // race, then the tray, using real engines on private near-silent player processes - never
+    // on any real app.
     // Arguments: <report file> <player pid> [<second player pid>]. The second player is
     // KILLED in step 7 to check the status line after a self-stop; the first is left alone.
     internal static class UiTest
@@ -49,6 +50,13 @@ namespace AppVolumeBoosterNs
             list.SetItemChecked(0, true);
         }
 
+        static AppEntry Row(string name, bool playing)
+        {
+            AppEntry e = new AppEntry();
+            e.Name = name; e.Title = name; e.Playing = playing;
+            return e;
+        }
+
         [STAThread]
         public static int Main(string[] a)
         {
@@ -56,6 +64,9 @@ namespace AppVolumeBoosterNs
             uint player = uint.Parse(a[1]);
             uint player2 = a.Length > 2 ? uint.Parse(a[2]) : 0;
             MainForm f = new MainForm();
+            // shown, in step 9, far off the screen
+            f.StartPosition = FormStartPosition.Manual;
+            f.Location = new System.Drawing.Point(-4000, -4000);
             IntPtr h = f.Handle;
             Label status = (Label)F(f, "status");
             ListOnly(f, player, "player");
@@ -179,6 +190,79 @@ namespace AppVolumeBoosterNs
                     Check(F(f, "engine") == null, "no boost was started on a process that is gone");
                     Check(status.Text.IndexOf("has closed or restarted") >= 0, "and the window says so (" + status.Text + ")");
                 }
+
+                log.AppendLine("  -- 9. the tray: what Start there takes, minimising into it, Start/Stop and the slider in its panel --");
+                // no "still running" notice on the screen during a test (the rig puts settings.txt back)
+                Settings.TrayHintShown = true;
+                // the choice when nothing is checked - on made-up rows, nothing is boosted here
+                string why;
+                AppEntry aimp = Row("AIMP", true), thorQuiet = Row("thorium", false), thorPlaying = Row("thorium", true), ps = Row("powershell", true);
+                List<int> pick = MainForm.TrayPick(new List<AppEntry> { aimp, thorQuiet, ps }, new string[] { "thorium" }, out why);
+                Check(pick.Count == 1 && pick[0] == 1 && why == "boosted last time", "the app of the last boost is taken, also while it is quiet");
+                pick = MainForm.TrayPick(new List<AppEntry> { aimp, thorQuiet, thorPlaying }, new string[] { "Thorium" }, out why);
+                Check(pick.Count == 1 && pick[0] == 2, "of two rows of that app, the one that is playing");
+                pick = MainForm.TrayPick(new List<AppEntry> { aimp, thorQuiet, ps }, new string[0], out why);
+                Check(pick.Count == 1 && pick[0] == 0 && why == "playing now", "with no last boost, the first app that is playing - and only that one");
+                pick = MainForm.TrayPick(new List<AppEntry> { thorQuiet, ps }, new string[] { "gone" }, out why);
+                Check(pick.Count == 1 && pick[0] == 1, "a last app that is not running falls back to the one playing");
+                pick = MainForm.TrayPick(new List<AppEntry> { thorQuiet }, new string[] { "gone" }, out why);
+                Check(pick.Count == 0, "nothing playing and nothing remembered: nothing is taken");
+
+                // minimised, the window goes to the tray (it is shown far off the screen)
+                NotifyIcon tray = (NotifyIcon)F(f, "tray");
+                f.Show();
+                Pump();
+                f.WindowState = FormWindowState.Minimized;
+                Pump();
+                Check(!f.Visible && tray.Visible, "minimised, the window leaves the taskbar and its icon is in the tray");
+                f.RestoreFromTray();
+                Pump();
+                Check(f.Visible && f.WindowState == FormWindowState.Normal && !tray.Visible, "a click on the icon brings it back, and the icon goes");
+
+                // Start in the panel, with the player checked in the window. The checks are looked
+                // at BEFORE anything starts: a Start from the tray must never reach a real app.
+                ListOnly(f, player, "player");
+                TrayPopup pop = new TrayPopup(f);
+                SetF(f, "popup", pop);
+                bool prepared = (bool)typeof(MainForm).GetMethod("PrepareTrayBoost", NP).Invoke(f, null);
+                List<uint> chosen = (List<uint>)typeof(MainForm).GetMethod("CheckedPids", NP).Invoke(f, null);
+                bool onlyPlayer = prepared && chosen.Count == 1 && chosen[0] == player;
+                typeof(MainForm).GetMethod("SyncTray", NP).Invoke(f, null);   // as a right-click on the icon does
+                Check(onlyPlayer, "with the player checked in the window, the tray takes that - and only that (" + chosen.Count + " checked)");
+                Check(pop.What.Text.IndexOf("as chosen in the window") >= 0, "and the panel says so (" + pop.What.Text + ")");
+                if (onlyPlayer)
+                {
+                    Toggle(f);
+                    WaitStart(f);
+                    BoostEngine T = (BoostEngine)F(f, "engine");
+                    leftover = T;
+                    Check(T != null && !T.Stopped, "Start boosts it");
+                    Check(pop.Go.Text == "Stop boost" && pop.Go.Enabled, "the panel's button now reads Stop boost");
+                    string[] last = Settings.LastApps;
+                    Check(last.Length == 1 && last[0] == "powershell", "the app is remembered as the last boost (" + string.Join("|", last) + ")");
+                    pop.Slider.Value = 200;
+                    DarkSlider main = (DarkSlider)F(f, "slider");
+                    Check(main.Value == 200 && T != null && T.BoostPercent == 200, "the panel's slider changes the running boost (" + (T == null ? 0 : T.BoostPercent) + "%)");
+                    main.Value = 150;
+                    Check(pop.Slider.Value == 150, "and follows the window's slider");
+                    f.TrayToggle();
+                    Check(F(f, "engine") == null && T != null && T.Stopped, "Stop in the panel stops it");
+                    Check(pop.Go.Text == "Start boost", "and the button reads Start boost again");
+                    leftover = null;
+                }
+
+                log.AppendLine("  -- 10. the exe started again while the window is in the tray: that window comes back --");
+                // as Program.Main does it, under a name of this test's own (never the real one)
+                string name = "AppVolumeBooster.Test." + Process.GetCurrentProcess().Id;
+                Check(SingleWindow.Claim(name), "the first start claims the window");
+                SingleWindow.Listen(name, delegate { try { f.BeginInvoke((MethodInvoker)delegate { f.RestoreFromTray(); }); } catch { } });
+                f.ToTray();
+                Pump();
+                Check(!f.Visible && tray.Visible, "the window is in the tray");
+                Check(!SingleWindow.Claim(name), "a second start finds it, asks it to show itself, and opens nothing of its own");
+                for (int i = 0; i < 300 && !f.Visible; i++) { Application.DoEvents(); Thread.Sleep(10); }
+                Check(f.Visible && f.WindowState == FormWindowState.Normal && !tray.Visible, "and the window is back, out of the tray");
+                f.Hide();
             }
             finally
             {
