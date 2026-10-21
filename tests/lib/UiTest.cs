@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Windows.Forms;
@@ -10,13 +11,15 @@ using System.Windows.Forms;
 namespace AppVolumeBoosterNs
 {
     // Drives the real MainForm (via reflection): first its app list, then the stop/start
-    // race, then the tray, using real engines on private near-silent player processes - never
-    // on any real app.
+    // race, then the tray, the remembered level, the automatic boost, the keyboard shortcuts,
+    // the X-to-tray option and the Start-with-Windows shortcut - with real engines on private
+    // near-silent player processes, never on any real app.
     // Arguments: <report file> <player pid> [<second player pid>]. The second player is
     // KILLED in step 7 to check the status line after a self-stop; the first is left alone.
     internal static class UiTest
     {
         static readonly BindingFlags NP = BindingFlags.NonPublic | BindingFlags.Instance;
+        [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, IntPtr l);
         static StringBuilder log = new StringBuilder();
         static bool anyFail;
         static void Check(bool c, string what) { log.AppendLine((c ? "    PASS  " : "    FAIL  ") + what); if (!c) anyFail = true; }
@@ -263,6 +266,106 @@ namespace AppVolumeBoosterNs
                 for (int i = 0; i < 300 && !f.Visible; i++) { Application.DoEvents(); Thread.Sleep(10); }
                 Check(f.Visible && f.WindowState == FormWindowState.Normal && !tray.Visible, "and the window is back, out of the tray");
                 f.Hide();
+
+                log.AppendLine("  -- 11. the level an app was last boosted at --");
+                DarkSlider slider = (DarkSlider)F(f, "slider");
+                Settings.SetLevel("powershell", 220);   // the rig puts settings.txt back afterwards
+                slider.Value = 150;
+                ListOnly(f, player, "player");          // checks the player: the slider follows
+                Pump();
+                Check(slider.Value == 220, "checking an app sets the slider to the level it was boosted at last (" + slider.Value + "%)");
+                slider.Value = 170;
+                Toggle(f);
+                WaitStart(f);
+                BoostEngine L = (BoostEngine)F(f, "engine");
+                leftover = L;
+                Check(L != null && !L.Stopped && Settings.LevelOf("powershell") == 170, "a boost that starts saves the slider for its app (" + Settings.LevelOf("powershell") + "%)");
+                slider.Value = 190;
+                tick.Invoke(f, null);
+                Check(Settings.LevelOf("powershell") == 190, "and the slider moved during the boost is saved on the next tick (" + Settings.LevelOf("powershell") + "%)");
+                Toggle(f);
+                leftover = null;
+                slider.Value = 150;
+
+                log.AppendLine("  -- 12. the automatic boost: it starts when the app plays, not again after Stop until the app was quiet --");
+                SetF(f, "autoNames", new string[] { "powershell" });
+                SetF(f, "autoHold", false);
+                Check(F(f, "engine") == null, "nothing is boosted");
+                for (int i = 0; i < 3 && F(f, "engine") == null; i++) tick.Invoke(f, null);
+                WaitStart(f);
+                BoostEngine A2 = (BoostEngine)F(f, "engine");
+                leftover = A2;
+                Check(A2 != null && !A2.Stopped && (bool)F(f, "autoStarted"), "the playing player starts a boost by itself");
+                Check(status.Text.StartsWith("Boosting") && ((Label)F(f, "detail")).Text.StartsWith("Started by itself"), "and the window says it started by itself (" + ((Label)F(f, "detail")).Text + ")");
+                Toggle(f);   // Stop, by hand
+                leftover = null;
+                Check((bool)F(f, "autoHold"), "a Stop by hand holds the automatic boost");
+                for (int i = 0; i < 6; i++) tick.Invoke(f, null);
+                WaitStart(f);
+                Check(F(f, "engine") == null, "... so the still-playing app is NOT boosted again (6 ticks)");
+                SetF(f, "autoHold", false);   // as the app going quiet does
+                for (int i = 0; i < 3 && F(f, "engine") == null; i++) tick.Invoke(f, null);
+                WaitStart(f);
+                BoostEngine A3 = (BoostEngine)F(f, "engine");
+                leftover = A3;
+                Check(A3 != null && !A3.Stopped, "once the hold is gone (the app was quiet), its sound starts the boost again");
+                Toggle(f);
+                leftover = null;
+                SetF(f, "autoNames", new string[0]);
+                SetF(f, "autoHold", false);
+                SetF(f, "autoStarted", false);
+
+                log.AppendLine("  -- 13. the keyboard shortcuts: Ctrl+Alt+B starts and stops, Ctrl+Alt+Up and Down change the boost --");
+                ListOnly(f, player, "player");
+                slider.Value = 150;
+                bool hk = f.SetHotkeys(true);
+                if (!hk) log.AppendLine("    (Ctrl+Alt+B, Up or Down belongs to another program on this machine - the shortcuts are not tried)");
+                else
+                {
+                    IntPtr hwnd = f.Handle;
+                    const int WM_HOTKEY = 0x0312;
+                    SendMessage(hwnd, WM_HOTKEY, (IntPtr)1, IntPtr.Zero);
+                    WaitStart(f);
+                    BoostEngine H = (BoostEngine)F(f, "engine");
+                    leftover = H;
+                    Check(H != null && !H.Stopped, "Ctrl+Alt+B starts the boost on the checked app");
+                    SendMessage(hwnd, WM_HOTKEY, (IntPtr)2, IntPtr.Zero);
+                    Check(slider.Value == 160 && H != null && H.BoostPercent == 160, "Ctrl+Alt+Up: 10% louder (" + slider.Value + "%)");
+                    SendMessage(hwnd, WM_HOTKEY, (IntPtr)3, IntPtr.Zero);
+                    SendMessage(hwnd, WM_HOTKEY, (IntPtr)3, IntPtr.Zero);
+                    Check(slider.Value == 140, "Ctrl+Alt+Down twice: 20% quieter (" + slider.Value + "%)");
+                    SendMessage(hwnd, WM_HOTKEY, (IntPtr)1, IntPtr.Zero);
+                    Check(F(f, "engine") == null && H != null && H.Stopped, "Ctrl+Alt+B again stops it");
+                    leftover = null;
+                    Check(f.SetHotkeys(false), "the shortcuts can be given up again");
+                    slider.Value = 150;
+                }
+
+                log.AppendLine("  -- 14. the X button with 'hide to the tray' on, and the Start-with-Windows shortcut --");
+                f.CloseToTray = true;
+                f.Show();
+                Pump();
+                f.Close();
+                Pump();
+                Check(!f.IsDisposed && !f.Visible && tray.Visible, "with the option on, X hides the window to the tray instead of quitting");
+                f.RestoreFromTray();
+                Pump();
+                f.CloseToTray = false;
+                f.Hide();
+                // the shortcut, in a folder of the test's own under the tests' temp area
+                string startupDir = Path.Combine(Path.Combine(Path.GetTempPath(), "AudioMixerFix-tests"), "startup-" + Process.GetCurrentProcess().Id);
+                Directory.CreateDirectory(startupDir);
+                try
+                {
+                    string exe = Application.ExecutablePath;
+                    Startup.Set(true, startupDir, exe);
+                    string lnk = Startup.LinkPath(startupDir);
+                    Check(File.Exists(lnk) && Startup.IsOn(startupDir, exe), "Start with Windows writes a shortcut to this exe, and reads it back as on");
+                    Check(!Startup.IsOn(startupDir, Path.Combine(startupDir, "somewhere-else.exe")), "a shortcut that points at another exe does not count as on");
+                    Startup.Set(false, startupDir, exe);
+                    Check(!File.Exists(lnk), "switching it off removes the shortcut");
+                }
+                finally { try { Directory.Delete(startupDir, true); } catch { } }
             }
             finally
             {

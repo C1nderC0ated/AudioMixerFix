@@ -24,9 +24,11 @@ namespace AppVolumeBoosterNs
     //                                      "claimed", listens <ms> long, then "first shown=<n>"
     //                                      (n = how often a later start asked it to show).
     //                                      Not first: writes "second" at once. No window either way.
-    //   shot  <out.png> [idle|boosting|waiting|empty|tray|tray-on]
+    //   shot  <out.png> [idle|boosting|waiting|empty|tray|tray-on|options]
     //                                      (tray, tray-on: the panel a right-click on the tray
-    //                                      icon opens, with made-up text)
+    //                                      icon opens, with made-up text; options: the gear's
+    //                                      window). The picture is the inside of the window,
+    //                                      without the frame.
     //                                      a picture of the booster's window, shown far off
     //                                      screen. With a look given, the list holds stand-in
     //                                      rows and the window is dressed as in that state;
@@ -148,6 +150,8 @@ namespace AppVolumeBoosterNs
                         list.Items.Add(e); listPids.Add(e.Pid); listNames.Add(e.Name);
                     }
                     if (list.Items.Count > 0) list.SetItemChecked(0, true);
+                    // the status says what the real (empty) list said at Load: the made-up rows get the ready line
+                    if (look == "idle") typeof(MainForm).GetMethod("SayReady", np).Invoke(f, null);
                     if (look == "boosting" || look == "waiting")
                     {
                         System.Windows.Forms.Button start = (System.Windows.Forms.Button)typeof(MainForm).GetField("startBtn", np).GetValue(f);
@@ -166,6 +170,15 @@ namespace AppVolumeBoosterNs
                     for (int i = 0; i < 20; i++) { System.Windows.Forms.Application.DoEvents(); Thread.Sleep(10); }
                 }
                 System.Windows.Forms.Form pic = f;
+                if (look == "options")
+                {
+                    OptionsForm o = new OptionsForm(f);
+                    o.StartPosition = System.Windows.Forms.FormStartPosition.Manual;
+                    o.Location = new System.Drawing.Point(-4000, -4000);
+                    o.Show();
+                    for (int i = 0; i < 20; i++) { System.Windows.Forms.Application.DoEvents(); Thread.Sleep(10); }
+                    pic = o;
+                }
                 if (look == "tray" || look == "tray-on")
                 {
                     TrayPopup pop = new TrayPopup(f);
@@ -179,7 +192,11 @@ namespace AppVolumeBoosterNs
                 using (System.Drawing.Bitmap bmp = new System.Drawing.Bitmap(pic.Width, pic.Height))
                 {
                     pic.DrawToBitmap(bmp, new System.Drawing.Rectangle(0, 0, pic.Width, pic.Height));
-                    bmp.Save(a[1], System.Drawing.Imaging.ImageFormat.Png);
+                    // the inside of the window: the frame around it is drawn in the old style here
+                    System.Drawing.Rectangle inside = pic.RectangleToScreen(pic.ClientRectangle);
+                    inside.Offset(-pic.Left, -pic.Top);
+                    using (System.Drawing.Bitmap crop = bmp.Clone(inside, bmp.PixelFormat))
+                        crop.Save(a[1], System.Drawing.Imaging.ImageFormat.Png);
                 }
                 if (!object.ReferenceEquals(pic, f)) pic.Close();
                 f.Close();

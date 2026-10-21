@@ -6,13 +6,16 @@ into boosting all audio). It lives in the `VolumeBooster\` subfolder and
 changes nothing on the system: no drivers, no services, no admin rights, no
 installation. If you never run it, it does nothing.
 
+![The booster window](VolumeBooster/booster-window.png)
+
 | File | Purpose |
 |---|---|
 | `VolumeBooster\AppVolumeBooster.exe` | The tool (double-click). Needs nothing installed. |
 | `VolumeBooster\AppVolumeBooster.cs` | Complete source code, one file. |
 | `VolumeBooster\Build-Booster.cmd` | Rebuilds the exe using the C# compiler that ships inside Windows - works even on a freshly reinstalled machine with no tools. It compiles to a temporary file and only then replaces the exe, so a failed rebuild leaves the working binary you already had and exits non-zero instead of reporting success. |
 | `%LocalAppData%\AppVolumeBooster\booster-state.txt` | Appears only while a boost is active (crash-recovery data, see below). Deleted automatically. There is one per Windows user, shared by every copy of the exe, wherever a copy sits - a read-only folder included. Written through a temporary file and an atomic replace, so killing the booster during the write cannot leave it truncated. (Only if that folder cannot be used does the note go next to the exe, and failing that to `%TEMP%`.) |
-| `%LocalAppData%\AppVolumeBooster\settings.txt` | What the window remembers: the app of your last boost (for **Start boost** in the tray), whether you switched **Auto-refresh** off, and that the "still running in the tray" notice was shown once. One short line each; there is no file until one of them is set. |
+| `%LocalAppData%\AppVolumeBooster\settings.txt` | What the window remembers: the app of your last boost (for **Start boost** in the tray), the level each app was last boosted at, the apps that are boosted automatically, the three Options, whether you switched **Auto-refresh** off, and that the "still running in the tray" notice was shown once. One short line each; there is no file until one of them is set. |
+| `%AppData%\Microsoft\Windows\Start Menu\Programs\Startup\App Volume Booster.lnk` | Exists only while **Start with Windows** (in Options) is on: a shortcut that starts the booster into the tray at logon. Switching the option off deletes it. |
 
 ## How to use it
 
@@ -22,9 +25,16 @@ installation. If you never run it, it does nothing.
 4. Optional:
    - **Also boost Windows system sounds** - beeps and notifications, without touching other apps. Windows does not give this mixer entry a real process; if capture fails, the status line says so and the reliable alternative is the next box.
    - **Boost all audio on this device** - boost everything on the default output, including Windows system sounds. The app list is ignored while this is checked.
+   - **Boost (the checked app) automatically whenever it plays** - from then on, the moment that app makes a sound the boost starts by itself, in the window or from the tray, at the level it was last boosted at; the status line says *Started by itself*. If you stop such a boost yourself, it is not started again until the app has been quiet - otherwise Stop would be undone two seconds later. The box names the app it stands for; unchecking it forgets it.
 5. Keep the booster running while you need the boost - in its window, or in the tray (below). Press **Stop boost** or close the window to return everything to normal.
 
-The line under the button says in plain words what is going on - *Boosting Thorium at 150%*, *Waiting - no sound from Thorium yet*, *Stopped: the app was closed* - and the smaller line below it gives the details. Under the slider the window says what the number means (*1.5 times the normal volume*).
+The line under the button says in plain words what is going on - *Boosting Thorium at 150%*, *Waiting - no sound from Thorium yet*, *Stopped: the app was closed* - and the smaller line below it gives the details. Under the slider the window says what the number means (*1.5 times the normal volume*). The booster remembers the level each app was last boosted at: check Thorium and the slider goes to Thorium's level, check Discord and it goes to Discord's.
+
+**Options (the gear button).** Three choices that are off unless you switch them on:
+
+- **Start with Windows, in the tray** - a shortcut in your Startup folder starts the booster into the notification area at logon. With an app set to boost automatically, that is all it takes: log on, play, it is loud.
+- **Keyboard shortcuts in every app** - **Ctrl+Alt+B** starts or stops the boost (what Start in the tray panel would do), **Ctrl+Alt+Up** and **Ctrl+Alt+Down** change it by 10%. They work whatever is in front; a program that uses the same keys loses them while this is on, and if another program holds them already the booster says so and leaves the option off.
+- **The X button hides the window to the tray** - instead of ending the boost and quitting. **Exit** is then in the tray's right-click panel.
 
 **In the tray.** Minimising the window puts the booster in the notification area instead of the taskbar - a boost keeps running there. The icon is purple with sound waves while a boost runs and grey while it does not. Click the icon to bring the window back. Right-click it for a small panel with the boost's slider and **Start boost** / **Stop boost**, plus **Open window** and **Exit**. A Start from the panel boosts what is checked in the window; with nothing checked, it takes the app you boosted last time if it is running, or else the app that is playing sound right now - one app, never a guess at several - and the panel says which before you press it. On Windows 11 a new tray icon starts out in the hidden part of the tray (the ^ arrow); drag it onto the taskbar to keep it in sight. If a boost ends by itself while the window is in the tray (the app was closed), a notification says so. Starting `AppVolumeBooster.exe` again while it is in the tray brings that window back rather than opening a second booster (the command line is not affected).
 
@@ -107,6 +117,7 @@ and writes a one-line result to `--log`.
 - `--system-sounds` includes the Windows System sounds session when the OS allows that capture.
 - `--all` boosts every sound on the default device, including system sounds (the app list is ignored).
 - `--system` is accepted as a synonym for `--system-sounds`.
+- `--tray` on its own is not a command-line run: it opens the window straight into the tray (it is what the Start-with-Windows shortcut passes).
 - `--padms` sets the starting render-buffer size in milliseconds (10-150, default ~50). It exists for latency testing; leave it alone otherwise.
 - An unrecognised or misspelled argument is an **error**: the run stops with exit code 1 rather than quietly continuing on the defaults, which is what `--bost 300` used to do. A flag with no value - at the end of the line, or followed by another flag - is reported the same way.
 - `--boost` is clamped to 100-500, and the `--log` line reports the value actually applied rather than the one requested, so `--boost 5000` logs `boost=500`.
@@ -193,6 +204,9 @@ brackets); the audio tests again used only the private near-silent test process.
   plain language, and purple instead of blue. UiRace covers its list and its status lines.
 - Added 2026-10-20: the tray (minimise to the notification area, a right-click panel with the
   slider and Start/Stop, the last boosted app remembered). UiRace covers it too.
+- Added 2026-10-21: the automatic boost, the level remembered per app, the keyboard
+  shortcuts, Start with Windows, the X button to the tray. UiRace covers each; the automatic
+  boost and the shortcuts are exercised on the private player.
 - The exe in the kit had not been rebuilt since 2026-09-23 while its source was being fixed,
   and no test could notice. The build test now compares the shipped exe with a fresh build.
 

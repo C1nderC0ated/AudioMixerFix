@@ -37,6 +37,8 @@
 //       [--padms <10..150>] [--log <file>]
 //   Anything not in that list is rejected, not ignored. This list is mirrored in
 //   VOLUME-BOOSTER.md - keep the parser, this comment and that file in step.
+//   "--tray" on its own is not a CLI run: it opens the window straight into the tray (what
+//   the "Start with Windows" shortcut passes).
 // =====================================================================================
 using System;
 using System.Collections.Generic;
@@ -354,6 +356,27 @@ namespace AppVolumeBoosterNs
 
         [DllImport("user32.dll")]
         public static extern bool AllowSetForegroundWindow(int pid);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+        static extern uint GetLongPathNameW(string path, System.Text.StringBuilder longPath, uint size);
+
+        // The path with every 8.3 piece (PROGRA~1) written out, when it exists; else as given.
+        public static string LongPath(string path)
+        {
+            try
+            {
+                System.Text.StringBuilder sb = new System.Text.StringBuilder(1024);
+                uint n = GetLongPathNameW(path, sb, (uint)sb.Capacity);
+                if (n > 0 && n < sb.Capacity) return sb.ToString();
+            }
+            catch { }
+            return path;
+        }
+
+        [DllImport("user32.dll")]
+        public static extern bool RegisterHotKey(IntPtr hwnd, int id, uint modifiers, uint vk);
+        [DllImport("user32.dll")]
+        public static extern bool UnregisterHotKey(IntPtr hwnd, int id);
 
         public static readonly Guid IID_IAudioClient = new Guid("1CB9AD4C-DBFA-4c32-B178-C2F568A703B2");
         public static readonly Guid IID_IAudioSessionManager2 = new Guid("77AA99A0-1BD6-484F-8BC7-2C654C9A9B6F");
@@ -2618,6 +2641,10 @@ namespace AppVolumeBoosterNs
     //   autorefresh=0      the list changes only when Refresh is pressed
     //   last=name|name     the apps (process names) of the last boost, for Start in the tray
     //   trayhint=1         the "still running in the tray" notice has been shown once
+    //   auto=name|name     the apps that are boosted by themselves whenever they play
+    //   level.<name>=200   the boost an app was last boosted at (the slider jumps to it)
+    //   hotkeys=1          Ctrl+Alt+B / Up / Down work in every app
+    //   closetotray=1      the window's X button hides it to the tray
     internal static class Settings
     {
         static string PathOf()
@@ -2683,6 +2710,165 @@ namespace AppVolumeBoosterNs
             get { return Get("trayhint", "0") == "1"; }
             set { Set("trayhint", value ? "1" : "0", "0"); }
         }
+
+        public static string[] AutoApps
+        {
+            get { return Get("auto", "").Split(new char[] { '|' }, StringSplitOptions.RemoveEmptyEntries); }
+            set { Set("auto", value == null ? "" : string.Join("|", value), ""); }
+        }
+
+        public static bool Hotkeys
+        {
+            get { return Get("hotkeys", "0") == "1"; }
+            set { Set("hotkeys", value ? "1" : "0", "0"); }
+        }
+
+        public static bool CloseToTray
+        {
+            get { return Get("closetotray", "0") == "1"; }
+            set { Set("closetotray", value ? "1" : "0", "0"); }
+        }
+
+        // The boost an app was last boosted at, or 0 when it never was.
+        public static int LevelOf(string name)
+        {
+            int v;
+            return int.TryParse(Get("level." + name.ToLowerInvariant(), "0"), NumberStyles.Integer, CultureInfo.InvariantCulture, out v) ? v : 0;
+        }
+
+        public static void SetLevel(string name, int percent)
+        {
+            Set("level." + name.ToLowerInvariant(), percent.ToString(CultureInfo.InvariantCulture), "0");
+        }
+    }
+
+    // "Start with Windows": a shortcut to this exe, with --tray, in the user's own Startup
+    // folder - a file of the user's, removed again by the same box. Nothing in the registry.
+    // The shortcut is made through the Windows Script Host's shell object by late binding, so
+    // the exe needs no reference it does not have.
+    internal static class Startup
+    {
+        public static string Folder { get { return Environment.GetFolderPath(Environment.SpecialFolder.Startup); } }
+        public static string LinkPath(string folder) { return System.IO.Path.Combine(folder, "App Volume Booster.lnk"); }
+
+        static object Shell() { return Activator.CreateInstance(Type.GetTypeFromProgID("WScript.Shell")); }
+        static object Member(object o, string name, object[] args, bool set)
+        {
+            return o.GetType().InvokeMember(name, set ? System.Reflection.BindingFlags.SetProperty : (args == null ? System.Reflection.BindingFlags.GetProperty : System.Reflection.BindingFlags.InvokeMethod), null, o, args);
+        }
+
+        // True when the shortcut exists and points at THIS exe (one left by a copy that was
+        // moved or deleted does not count, and ticking the box then replaces it). Windows
+        // hands a shortcut's target back in its long form whatever was written, so both sides
+        // are compared in that form.
+        public static bool IsOn(string folder, string exe)
+        {
+            string p = LinkPath(folder);
+            if (!File.Exists(p)) return false;
+            try
+            {
+                object lnk = Member(Shell(), "CreateShortcut", new object[] { p }, false);
+                string target = (string)Member(lnk, "TargetPath", null, false);
+                return string.Equals(Native.LongPath(target), Native.LongPath(exe), StringComparison.OrdinalIgnoreCase);
+            }
+            catch { return false; }
+        }
+
+        public static void Set(bool on, string folder, string exe)
+        {
+            string p = LinkPath(folder);
+            if (!on) { if (File.Exists(p)) File.Delete(p); return; }
+            Directory.CreateDirectory(folder);
+            object lnk = Member(Shell(), "CreateShortcut", new object[] { p }, false);
+            Member(lnk, "TargetPath", new object[] { exe }, true);
+            Member(lnk, "Arguments", new object[] { "--tray" }, true);
+            Member(lnk, "WorkingDirectory", new object[] { System.IO.Path.GetDirectoryName(exe) }, true);
+            Member(lnk, "Description", new object[] { "App Volume Booster, in the tray" }, true);
+            Member(lnk, "Save", new object[0], false);
+        }
+    }
+
+    // The window behind the gear button: the three choices that are not about one boost.
+    internal class OptionsForm : Form
+    {
+        readonly MainForm main;
+        internal readonly CheckBox StartWithWindows = new DarkCheck();
+        internal readonly CheckBox Hotkeys = new DarkCheck();
+        internal readonly CheckBox CloseToTray = new DarkCheck();
+        readonly Label note = new Label();
+
+        public OptionsForm(MainForm owner)
+        {
+            main = owner;
+            AutoScaleMode = AutoScaleMode.Dpi;
+            AutoScaleDimensions = new SizeF(96f, 96f);
+            Text = "Options";
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            MaximizeBox = false; MinimizeBox = false; ShowInTaskbar = false;
+            StartPosition = FormStartPosition.CenterParent;
+            ClientSize = new Size(440, 318);
+            Font = new Font("Segoe UI", 10f);
+            BackColor = Theme.Bg;
+            ForeColor = Theme.Text;
+
+            Add(StartWithWindows, "Start with Windows, in the tray", 16,
+                "Puts a shortcut in your Startup folder. The booster then waits in the notification area from logon on; nothing else is changed.");
+            Add(Hotkeys, "Keyboard shortcuts in every app", 108,
+                "Ctrl+Alt+B starts or stops the boost, Ctrl+Alt+Up and Ctrl+Alt+Down change it by 10%. They work whatever is in front, and a program that uses the same keys loses them.");
+            Add(CloseToTray, "The X button hides the window to the tray", 200,
+                "Instead of ending the boost and quitting. Exit is then in the tray's right-click panel.");
+
+            note.SetBounds(20, 278, 300, 26);
+            note.Font = new Font("Segoe UI", 9f);
+            note.BackColor = Theme.Bg;
+            note.ForeColor = Theme.Warn;
+            Button close = new Button();
+            close.Text = "Close";
+            close.Font = new Font("Segoe UI", 9f);
+            close.SetBounds(330, 276, 90, 30);
+            Theme.Button(close, Theme.Surface, Theme.SurfaceHot);
+            close.Click += delegate { Close(); };
+            CancelButton = close;
+            Controls.Add(note);
+            Controls.Add(close);
+
+            StartWithWindows.Checked = Startup.IsOn(Startup.Folder, Application.ExecutablePath);
+            Hotkeys.Checked = Settings.Hotkeys;
+            CloseToTray.Checked = Settings.CloseToTray;
+            StartWithWindows.Click += delegate
+            {
+                note.Text = "";
+                try { Startup.Set(StartWithWindows.Checked, Startup.Folder, Application.ExecutablePath); }
+                catch (Exception ex) { StartWithWindows.Checked = false; note.Text = "The shortcut could not be written: " + ex.Message; }
+            };
+            Hotkeys.Click += delegate
+            {
+                note.Text = "";
+                if (Hotkeys.Checked && !main.SetHotkeys(true))
+                {
+                    Hotkeys.Checked = false;
+                    note.Text = "Another program already uses Ctrl+Alt+B, Up or Down.";
+                }
+                else if (!Hotkeys.Checked) main.SetHotkeys(false);
+                Settings.Hotkeys = Hotkeys.Checked;
+            };
+            CloseToTray.Click += delegate { Settings.CloseToTray = CloseToTray.Checked; main.CloseToTray = CloseToTray.Checked; };
+            HandleCreated += delegate { Native.UseDarkTitleBar(Handle); };
+        }
+
+        void Add(CheckBox box, string text, int y, string explain)
+        {
+            box.Text = text;
+            box.SetBounds(20, y, 400, 28);
+            Label l = new Label();
+            l.Text = explain;
+            l.Font = new Font("Segoe UI", 9f);
+            l.SetBounds(48, y + 28, 372, 52);
+            l.BackColor = Theme.Bg;
+            l.ForeColor = Theme.Muted;
+            Controls.Add(box);
+            Controls.Add(l);
+        }
     }
 
     // What a right-click on the tray icon opens: the boost, its slider and Start/Stop, without
@@ -2710,7 +2896,7 @@ namespace AppVolumeBoosterNs
             TopMost = true;
             StartPosition = FormStartPosition.Manual;
             Text = "App Volume Booster";
-            ClientSize = new Size(300, 296);
+            ClientSize = new Size(300, 312);
             Font = new Font("Segoe UI", 10f);
             BackColor = Theme.Bg;
             ForeColor = Theme.Text;
@@ -2759,20 +2945,20 @@ namespace AppVolumeBoosterNs
             Go.Click += delegate { main.TrayToggle(); };
 
             What.Font = new Font("Segoe UI", 9f);
-            What.SetBounds(16, 224, 268, 32);
+            What.SetBounds(16, 224, 268, 48);
             What.BackColor = Theme.Bg;
             What.ForeColor = Theme.Muted;
 
             openBtn.Text = "Open window";
             openBtn.Font = new Font("Segoe UI", 9f);
-            openBtn.SetBounds(16, 258, 130, 28);
+            openBtn.SetBounds(16, 274, 130, 28);
             Theme.Button(openBtn, Theme.Surface, Theme.SurfaceHot);
             openBtn.Click += delegate { main.RestoreFromTray(); };
             exitBtn.Text = "Exit";
             exitBtn.Font = new Font("Segoe UI", 9f);
-            exitBtn.SetBounds(154, 258, 130, 28);
+            exitBtn.SetBounds(154, 274, 130, 28);
             Theme.Button(exitBtn, Theme.Surface, Theme.SurfaceHot);
-            exitBtn.Click += delegate { Hide(); main.Close(); };
+            exitBtn.Click += delegate { Hide(); main.Exit(); };
 
             Controls.Add(logo);
             Controls.Add(title);
@@ -2870,6 +3056,18 @@ namespace AppVolumeBoosterNs
         Icon trayOn, trayOff;
         bool trayIsOn;
         readonly List<IntPtr> iconHandles = new List<IntPtr>();
+        CheckBox chkAutoBoost = new DarkCheck();   // "Boost X automatically whenever it plays"
+        Button gearBtn = new Button();             // the Options window
+        string[] autoNames = new string[0];        // the apps that are boosted by themselves
+        bool autoHold;        // true after a boost of them was stopped by hand: not again until they stop playing
+        bool startingAuto;    // the start about to happen is the automatic one
+        bool autoStarted;     // the running boost started by itself
+        bool hotkeysOn;
+        bool announceStart;   // a start by hotkey, with the window hidden: say so from the tray
+        bool levelDirty;      // the slider moved while boosting: the apps' levels are written on the next tick
+        bool ready;           // SelfHeal and the first list are done
+        bool exiting;         // Exit was chosen: the X-to-tray option does not apply
+        internal bool CloseToTray;
 
         const string ReadyLine = "Choose an app, set how loud, then press Start boost.";
 
@@ -2910,7 +3108,7 @@ namespace AppVolumeBoosterNs
             Text = "App Volume Booster";
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
-            ClientSize = new Size(500, 584);
+            ClientSize = new Size(500, 614);
             Font = new Font("Segoe UI", 10f);
             BackColor = Theme.Bg;
             ForeColor = Theme.Text;
@@ -2935,25 +3133,32 @@ namespace AppVolumeBoosterNs
 
             // ---- 1: what ----
             Badge one = Step("1", 20, 16);
-            Label appLbl = Heading("Choose what to make louder", 54, 16, 226);
+            Label appLbl = Heading("What to make louder", 54, 16, 206);
 
             refreshBtn.Text = "Refresh";
             refreshBtn.Font = new Font("Segoe UI", 9f);
-            refreshBtn.SetBounds(396, 16, 84, 27);
+            refreshBtn.SetBounds(370, 16, 70, 27);
             Theme.Button(refreshBtn, Theme.Surface, Theme.SurfaceHot);
             refreshBtn.Click += delegate { FillSessions(); };
+
+            gearBtn.Text = "\u2699";   // a gear
+            gearBtn.Font = new Font("Segoe UI Symbol", 11f);
+            gearBtn.SetBounds(444, 16, 36, 27);
+            Theme.Button(gearBtn, Theme.Surface, Theme.SurfaceHot);
+            gearBtn.Click += delegate { ShowOptions(); };
 
             // The list refreshing itself is a choice: some would rather it only changed when
             // they press Refresh. The choice is kept for the next run - saved on a click, not
             // on every change of the box, so nothing but the user's own click writes the file.
             chkAuto.Text = "Auto-refresh";
             chkAuto.Font = new Font("Segoe UI", 9f);
-            chkAuto.SetBounds(284, 16, 108, 27);
+            chkAuto.SetBounds(262, 16, 104, 27);
             chkAuto.Checked = Settings.AutoRefresh;
             chkAuto.CheckedChanged += delegate { ShowEmptyText(); };
             chkAuto.Click += delegate { Settings.AutoRefresh = chkAuto.Checked; if (chkAuto.Checked && engine == null && !starting) RefreshList(true); };
             ToolTip tip = new ToolTip();
             tip.SetToolTip(chkAuto, "While nothing is being boosted, update the list every 2 seconds.\r\nOff: the list only changes when you press Refresh.");
+            tip.SetToolTip(gearBtn, "Options: start with Windows, keyboard shortcuts, the X button");
 
             list.CheckOnClick = true;
             list.IntegralHeight = false;
@@ -2961,6 +3166,13 @@ namespace AppVolumeBoosterNs
             list.BackColor = Theme.Surface;
             list.ForeColor = Theme.Text;
             list.SetBounds(20, 52, 460, 182);
+            // a check changed: the third box names the checked app, and the slider goes to the
+            // level that app was last boosted at (ItemCheck comes BEFORE the change, so later)
+            list.ItemCheck += delegate
+            {
+                try { BeginInvoke((MethodInvoker)delegate { UpdateAutoBoostBox(); ApplyRememberedLevel(); }); }
+                catch { }   // no handle yet
+            };
 
             ShowEmptyText();
 
@@ -2971,28 +3183,43 @@ namespace AppVolumeBoosterNs
             chkAll.SetBounds(20, 274, 460, 28);
             chkAll.CheckedChanged += delegate { SyncModeEnabled(); };
 
+            // The app that gets boosted without anyone pressing Start: a click here takes the
+            // checked apps, and from then on their sound starts the boost - in the window or
+            // from the tray. Saved on the click, like the other boxes.
+            chkAutoBoost.SetBounds(20, 304, 460, 28);
+            autoNames = Settings.AutoApps;
+            chkAutoBoost.Click += delegate
+            {
+                autoNames = chkAutoBoost.Checked ? CheckedNames() : new string[0];
+                autoHold = false;
+                Settings.AutoApps = autoNames;
+                UpdateAutoBoostBox();
+                SyncTray();
+            };
+            UpdateAutoBoostBox();
+
             // ---- 2: how loud ----
-            Badge two = Step("2", 20, 322);
-            Label volLbl = Heading("How loud?", 54, 322, 200);
+            Badge two = Step("2", 20, 352);
+            Label volLbl = Heading("How loud?", 54, 352, 200);
 
             boostLbl.Text = "150%";
             boostLbl.Font = Semibold(20f);
             boostLbl.TextAlign = ContentAlignment.MiddleRight;
-            boostLbl.SetBounds(340, 312, 142, 42);
+            boostLbl.SetBounds(340, 342, 142, 42);
             boostLbl.BackColor = Theme.Bg;
             boostLbl.ForeColor = Theme.AccentLight;
 
             slider.Minimum = 100; slider.Maximum = (int)(BoostEngine.MAXBOOST * 100);
             slider.Value = 150;
-            slider.SetBounds(8, 362, 484, 58);
+            slider.SetBounds(8, 392, 484, 58);
             slider.ValueChanged += delegate
             {
                 ShowBoost();
-                if (engine != null && !engine.Stopped) { engine.SetBoost(slider.Value); UpdateStatus(); }
+                if (engine != null && !engine.Stopped) { engine.SetBoost(slider.Value); levelDirty = true; UpdateStatus(); }
                 SyncTray();
             };
 
-            boostHint.SetBounds(20, 422, 460, 22);
+            boostHint.SetBounds(20, 452, 460, 22);
             boostHint.Font = new Font("Segoe UI", 9f);
             boostHint.BackColor = Theme.Bg;
             boostHint.ForeColor = Theme.Muted;
@@ -3001,17 +3228,17 @@ namespace AppVolumeBoosterNs
             // ---- 3: go ----
             startBtn.Text = "Start boost";
             startBtn.Font = Semibold(12f);
-            startBtn.SetBounds(20, 456, 460, 46);
+            startBtn.SetBounds(20, 486, 460, 46);
             Theme.Button(startBtn, Theme.Accent, Theme.AccentHot);
             startBtn.Click += delegate { ToggleBoost(); };
 
-            statusDot.SetBounds(20, 521, 12, 12);
+            statusDot.SetBounds(20, 551, 12, 12);
             statusDot.Fill = Theme.Dim;
-            status.SetBounds(40, 515, 440, 24);
+            status.SetBounds(40, 545, 440, 24);
             status.AutoEllipsis = true;
             status.BackColor = Theme.Bg;
             status.ForeColor = Theme.Text;
-            detail.SetBounds(40, 540, 440, 38);
+            detail.SetBounds(40, 570, 440, 38);
             detail.Font = new Font("Segoe UI", 9f);
             detail.BackColor = Theme.Bg;
             detail.ForeColor = Theme.Muted;
@@ -3020,10 +3247,12 @@ namespace AppVolumeBoosterNs
             Controls.Add(one);
             Controls.Add(appLbl);
             Controls.Add(refreshBtn);
+            Controls.Add(gearBtn);
             Controls.Add(chkAuto);
             Controls.Add(list);
             Controls.Add(chkSys);
             Controls.Add(chkAll);
+            Controls.Add(chkAutoBoost);
             Controls.Add(two);
             Controls.Add(volLbl);
             Controls.Add(boostLbl);
@@ -3034,7 +3263,8 @@ namespace AppVolumeBoosterNs
             Controls.Add(status);
             Controls.Add(detail);
             // the keyboard goes through the window in the order it is read
-            list.TabIndex = 0; chkSys.TabIndex = 1; chkAll.TabIndex = 2; slider.TabIndex = 3; startBtn.TabIndex = 4; chkAuto.TabIndex = 5; refreshBtn.TabIndex = 6;
+            list.TabIndex = 0; chkSys.TabIndex = 1; chkAll.TabIndex = 2; chkAutoBoost.TabIndex = 3; slider.TabIndex = 4; startBtn.TabIndex = 5;
+            chkAuto.TabIndex = 6; refreshBtn.TabIndex = 7; gearBtn.TabIndex = 8;
 
             uiTimer.Interval = 1000;
             uiTimer.Tick += delegate { OnTick(); };
@@ -3045,14 +3275,207 @@ namespace AppVolumeBoosterNs
                 Native.UseDarkTitleBar(Handle);
                 Native.UseDarkExplorerTheme(Handle);
                 Native.UseDarkExplorerTheme(list.Handle);
+                if (Settings.Hotkeys && !SetHotkeys(true))
+                    Say(Theme.Warn, "The keyboard shortcuts could not be switched on.", "Another program already uses Ctrl+Alt+B, Up or Down. See Options (the gear).");
             };
-            Load += delegate
+            CloseToTray = Settings.CloseToTray;
+            Load += delegate { Ready(); };
+            FormClosing += delegate(object s, FormClosingEventArgs e)
             {
-                string healed = StateFile.SelfHeal();
-                FillSessions();
-                if (healed != null) Say(Theme.AccentLight, "Put " + healed + " back to its normal volume.", "A previous boost had ended without doing that.");
+                // the X button hides to the tray when that option is on; Exit, and Windows
+                // shutting down, still close
+                if (CloseToTray && !exiting && e.CloseReason == CloseReason.UserClosing)
+                {
+                    e.Cancel = true;
+                    ToTray();
+                    return;
+                }
+                if (engine != null) engine.Stop(true);
             };
-            FormClosing += delegate { if (engine != null) engine.Stop(true); };
+        }
+
+        // The window's first look at the machine: once, whether it is shown or starts in the tray.
+        void Ready()
+        {
+            if (ready) return;
+            ready = true;
+            string healed = StateFile.SelfHeal();
+            FillSessions();
+            if (healed != null) Say(Theme.AccentLight, "Put " + healed + " back to its normal volume.", "A previous boost had ended without doing that.");
+        }
+
+        // Started with --tray (the Start-with-Windows shortcut): no window, only the icon.
+        internal void StartInTray()
+        {
+            IntPtr h = Handle;   // created: the tray, the hotkeys and the timer need it
+            Ready();
+            ToTray();
+        }
+
+        internal void Exit()
+        {
+            exiting = true;
+            Close();
+        }
+
+        // ---- the gear ----
+        void ShowOptions()
+        {
+            using (OptionsForm o = new OptionsForm(this))
+            {
+                if (Visible) o.ShowDialog(this); else o.ShowDialog();
+            }
+            UpdateAutoBoostBox();
+        }
+
+        // ---- the keyboard shortcuts ----
+        const int HkToggle = 1, HkUp = 2, HkDown = 3;
+
+        // Registers (or gives up) Ctrl+Alt+B / Up / Down for the whole desktop. False when
+        // one of them belongs to another program already; then none of them is kept.
+        internal bool SetHotkeys(bool on)
+        {
+            IntPtr h = Handle;
+            if (hotkeysOn) { for (int id = HkToggle; id <= HkDown; id++) Native.UnregisterHotKey(h, id); hotkeysOn = false; }
+            if (!on) return true;
+            const uint mods = 0x0002 | 0x0001 | 0x4000;   // MOD_CONTROL | MOD_ALT | MOD_NOREPEAT
+            bool ok = Native.RegisterHotKey(h, HkToggle, mods, 0x42)      // B
+                   && Native.RegisterHotKey(h, HkUp, mods, 0x26)          // Up
+                   && Native.RegisterHotKey(h, HkDown, mods, 0x28);       // Down
+            if (!ok) { for (int id = HkToggle; id <= HkDown; id++) Native.UnregisterHotKey(h, id); return false; }
+            hotkeysOn = true;
+            return true;
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == 0x0312)   // WM_HOTKEY
+            {
+                int id = (int)m.WParam;
+                if (id == HkToggle) HotkeyToggle();
+                else if (id == HkUp) slider.Value = slider.Value + 10;
+                else if (id == HkDown) slider.Value = slider.Value - 10;
+                return;
+            }
+            base.WndProc(ref m);
+        }
+
+        void HotkeyToggle()
+        {
+            if (starting) return;
+            bool hidden = !Visible;
+            if (engine != null)
+            {
+                TrayToggle();
+                if (hidden && tray.Visible) tray.ShowBalloonTip(3000, "Boost stopped", "The volume is back to normal.", ToolTipIcon.None);
+                return;
+            }
+            announceStart = hidden;
+            TrayToggle();
+            if (engine == null && hidden && tray.Visible)
+                tray.ShowBalloonTip(4000, "Nothing to boost", status.Text + " " + detail.Text, ToolTipIcon.None);
+        }
+
+        // ---- "automatically whenever it plays" ----
+        // The third box names the apps it stands for: the saved ones while there are any,
+        // else the checked ones it would take.
+        void UpdateAutoBoostBox()
+        {
+            bool idle = (engine == null || engine.Stopped) && !starting;
+            if (autoNames.Length > 0)
+            {
+                chkAutoBoost.Text = "Boost " + TitlesOf(autoNames) + " automatically whenever " + (autoNames.Length > 1 ? "they play" : "it plays");
+                chkAutoBoost.Checked = true;
+                chkAutoBoost.Enabled = idle && !chkAll.Checked;
+            }
+            else
+            {
+                string[] chk = CheckedNames();
+                chkAutoBoost.Text = chk.Length > 0
+                    ? "Boost " + TitlesOf(chk) + " automatically whenever " + (chk.Length > 1 ? "they play" : "it plays")
+                    : "Boost the checked app automatically whenever it plays";
+                chkAutoBoost.Checked = false;
+                chkAutoBoost.Enabled = idle && !chkAll.Checked && chk.Length > 0;
+            }
+        }
+
+        // Process names as the list shows them ("Thorium and Discord"), or the names themselves.
+        string TitlesOf(string[] names)
+        {
+            List<string> r = new List<string>();
+            foreach (string n in names)
+            {
+                string title = n;
+                foreach (object o in list.Items)
+                {
+                    AppEntry a = o as AppEntry;
+                    if (a != null && string.Equals(a.Name, n, StringComparison.OrdinalIgnoreCase)) { title = a.Title; break; }
+                }
+                if (!r.Contains(title)) r.Add(title);
+            }
+            if (r.Count == 0) return "";
+            if (r.Count == 1) return r[0];
+            string last = r[r.Count - 1];
+            r.RemoveAt(r.Count - 1);
+            return string.Join(", ", r.ToArray()) + " and " + last;
+        }
+
+        // With one app checked, the slider goes to the level that app was last boosted at.
+        void ApplyRememberedLevel()
+        {
+            if (engine != null || starting) return;
+            string[] chk = CheckedNames();
+            if (chk.Length != 1) return;
+            int lvl = Settings.LevelOf(chk[0]);
+            if (lvl >= 100 && lvl != slider.Value) slider.Value = lvl;
+        }
+
+        // The pids of the apps named that are playing right now (a session of theirs is active).
+        List<uint> PlayingPids(string[] names)
+        {
+            List<uint> r = new List<uint>();
+            if (names.Length == 0) return r;
+            try
+            {
+                uint self = (uint)Process.GetCurrentProcess().Id;
+                foreach (IAudioSessionControl sc in Native.AllRenderSessions())
+                {
+                    IAudioSessionControl2 sc2 = (IAudioSessionControl2)sc;
+                    uint pid; sc2.GetProcessId(out pid);
+                    int st; sc2.GetState(out st);
+                    if (pid == 0 || pid == self || st != K.StateActive || r.Contains(pid)) continue;
+                    string name = Native.ProcessNameOf(pid);
+                    if (name == null || Native.IsBoosterName(name)) continue;
+                    foreach (string n in names)
+                        if (string.Equals(n, name, StringComparison.OrdinalIgnoreCase)) { r.Add(pid); break; }
+                }
+            }
+            catch { }
+            return r;
+        }
+
+        // Every two seconds while nothing is boosted: one of the automatic apps has started
+        // to play, so the boost starts - unless the user stopped such a boost by hand and the
+        // app has not been quiet since (that would start it right back).
+        void AutoBoostTick()
+        {
+            if (autoNames.Length == 0 || chkAll.Checked) return;
+            if (autoHold) { if (PlayingPids(autoNames).Count == 0) autoHold = false; return; }
+            List<uint> playing = PlayingPids(autoNames);
+            if (playing.Count == 0) return;
+            RefreshList(true);
+            bool any = false;
+            for (int i = 0; i < list.Items.Count && i < listPids.Count; i++)
+            {
+                if (!playing.Contains(listPids[i])) continue;
+                list.SetItemChecked(i, true);
+                any = true;
+            }
+            if (!any) return;
+            string[] chk = CheckedNames();
+            if (chk.Length == 1) { int lvl = Settings.LevelOf(chk[0]); if (lvl >= 100) slider.Value = lvl; }
+            startingAuto = true;
+            ToggleBoost();
         }
 
         // Once a second.
@@ -3064,6 +3487,12 @@ namespace AppVolumeBoosterNs
             // With "Auto-refresh" on, the list keeps itself up to date while nothing is being
             // boosted: an app that starts playing appears without anyone pressing Refresh.
             if (idle && chkAuto.Checked && tickN % 2 == 0 && WindowState != FormWindowState.Minimized) RefreshList(true);
+            if (idle && tickN % 2 == 0) AutoBoostTick();
+            if (levelDirty && engine != null && !engine.Stopped)
+            {
+                levelDirty = false;
+                foreach (string n in chosenNames) Settings.SetLevel(n, slider.Value);
+            }
             if (tickN % 5 == 0)
             {
                 string healed = null;
@@ -3136,6 +3565,7 @@ namespace AppVolumeBoosterNs
             chkSys.Enabled = idle && !all;
             chkAll.Enabled = idle;
             list.Invalidate();
+            UpdateAutoBoostBox();
         }
 
         void FillSessions() { RefreshList(false); }
@@ -3321,6 +3751,7 @@ namespace AppVolumeBoosterNs
                 refreshBtn.Enabled = false;
                 chkSys.Enabled = false;
                 chkAll.Enabled = false;
+                chkAutoBoost.Enabled = false;
                 list.Invalidate();
             }
             else SyncModeEnabled();
@@ -3348,8 +3779,12 @@ namespace AppVolumeBoosterNs
                 // gone (a restarted browser), and the next Start failed on one of them
                 FillSessions();
                 SayStopped(why, old.RestoreWarning);
+                // stopped by hand: the automatic boost waits until the app has been quiet
+                if (why == null && autoNames.Length > 0) autoHold = true;
                 return;
             }
+            autoStarted = startingAuto;
+            startingAuto = false;
             List<uint> pids = CheckedPids();
             bool all = chkAll.Checked;
             bool sys = chkSys.Checked && !all;
@@ -3358,6 +3793,7 @@ namespace AppVolumeBoosterNs
                 Say(Theme.Warn, "Nothing is chosen yet.", "Check an app in the list, or one of the two boxes below it.");
                 return;
             }
+            if (autoStarted) autoHold = true;   // one try per play, whatever comes of it
             // A list entry is a pid noted when the list was filled. If that process has gone,
             // or the pid now belongs to something else, the boost must not start on it.
             string stale = all ? null : StaleChecked();
@@ -3395,6 +3831,9 @@ namespace AppVolumeBoosterNs
                         // is playing sound yet", which used to overwrite the reason
                         FillSessions();
                         SayStopped(mine.StopReason, mine.RestoreWarning);
+                        // an automatic boost whose app closed may start again when the app is
+                        // back; one that ended for another reason waits until the app is quiet
+                        autoHold = (mine.StopReason != "target closed") && autoNames.Length > 0;
                         // with the window in the tray nothing else would show that it ended
                         if (tray.Visible && !Visible && mine.StopReason != "")
                         {
@@ -3435,11 +3874,20 @@ namespace AppVolumeBoosterNs
                             return;
                         }
                         if (mine.Stopped) return;
-                        // remembered for Start in the tray, which takes these when nothing is chosen
+                        // remembered for Start in the tray, which takes these when nothing is chosen,
+                        // and the level, which the slider goes back to for that app
                         if (chosenNames.Length > 0) Settings.LastApps = chosenNames;
+                        foreach (string n in chosenNames) Settings.SetLevel(n, slider.Value);
+                        // a boost that started by itself holds until the app is quiet again; it
+                        // was set before the start, and stays
+                        if (!autoStarted) autoHold = false;
                         startBtn.Text = "Stop boost";
                         StyleActionButton(true);
                         UpdateStatus();
+                        if ((autoStarted || announceStart) && tray.Visible && !Visible)
+                            tray.ShowBalloonTip(4000, status.Text,
+                                (autoStarted ? "Started by itself: " + boostWhat + " began playing. " : "") + "Right-click the icon to change or stop it.", ToolTipIcon.None);
+                        announceStart = false;
                     });
                 }
                 catch { }
@@ -3562,20 +4010,22 @@ namespace AppVolumeBoosterNs
         // What Start in the tray panel would boost, in words.
         string TrayPreview(out bool can)
         {
+            string auto = autoNames.Length > 0 && !chkAll.Checked
+                ? " " + TitlesOf(autoNames) + " starts a boost by itself when " + (autoNames.Length > 1 ? "they play." : "it plays.") : "";
             can = true;
             if (chkAll.Checked) return "Start boosts all audio, as chosen in the window.";
             if (chkSys.Checked || CheckedPids().Count > 0)
-                return "Start boosts " + CheckedTitles(false, chkSys.Checked) + ", as chosen in the window.";
+                return "Start boosts " + CheckedTitles(false, chkSys.Checked) + ", as chosen in the window." + auto;
             string why;
             List<int> pick = TrayPick(Entries(), Settings.LastApps, out why);
-            if (pick.Count == 0) { can = false; return "Nothing is playing. Start some music or a video, or open the window."; }
+            if (pick.Count == 0) { can = false; return "Nothing is playing. Start some music or a video, or open the window." + auto; }
             List<string> names = new List<string>();
             foreach (int i in pick)
             {
                 AppEntry a = (AppEntry)list.Items[i];
                 if (!names.Contains(a.Title)) names.Add(a.Title);
             }
-            return "Start boosts " + string.Join(" and ", names.ToArray()) + " - " + why + ".";
+            return "Start boosts " + string.Join(" and ", names.ToArray()) + " - " + why + "." + auto;
         }
 
         // The tray icon, its tooltip and the panel follow the window.
@@ -3600,6 +4050,7 @@ namespace AppVolumeBoosterNs
         {
             if (disposing)
             {
+                try { if (hotkeysOn) SetHotkeys(false); } catch { }
                 try { tray.Visible = false; tray.Dispose(); } catch { }
                 if (popup != null) { try { popup.Dispose(); } catch { } popup = null; }
             }
@@ -3646,7 +4097,8 @@ namespace AppVolumeBoosterNs
                 // said here, because it is the one thing about a boost that looks broken
                 Say(warn != "" ? Theme.Warn : Theme.AccentLight,
                     "Boosting " + boostWhat + " at " + slider.Value + "%",
-                    warn != "" ? warn : "In the Windows Volume Mixer the app's own slider sits at 4% meanwhile - that is how it works. " + numbers);
+                    (autoStarted ? "Started by itself - " + boostWhat + " began playing. " : "") +
+                    (warn != "" ? warn : "In the Windows Volume Mixer the app's own slider sits at 4% meanwhile - that is how it works. " + numbers));
             }
             else
             {
@@ -3716,7 +4168,9 @@ namespace AppVolumeBoosterNs
             Native.MarkAlive();
             try { Native.SetProcessDpiAwareness(1); } catch { }
 
-            if (args.Length > 0) return CliMain(args);
+            // "--tray" alone is the window too, started into the tray (the Start-with-Windows shortcut)
+            bool inTray = args.Length == 1 && string.Equals(args[0], "--tray", StringComparison.OrdinalIgnoreCase);
+            if (args.Length > 0 && !inTray) return CliMain(args);
 
             // a window is open already: it has been asked to come back, and this start ends here
             if (!SingleWindow.Claim(SingleWindow.Name)) return 0;
@@ -3732,7 +4186,13 @@ namespace AppVolumeBoosterNs
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             form = new MainForm();
-            Application.Run(form);
+            if (inTray)
+            {
+                // never shown until the icon is clicked; the context ends with the window
+                form.StartInTray();
+                Application.Run(new ApplicationContext(form));
+            }
+            else Application.Run(form);
             return 0;
         }
 

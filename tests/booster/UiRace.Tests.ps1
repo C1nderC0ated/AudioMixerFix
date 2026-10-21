@@ -17,6 +17,11 @@ trap { Write-Host ('    FAIL  harness error: ' + $_); $global:AnyFail = $true; c
 # And starting the exe again while the window is in the tray brings that window back instead
 # of opening a second one: in the window test, and here between two processes (the probe,
 # under a test name - no window, and the user's own booster is never asked anything).
+# Then the level an app was last boosted at, the automatic boost (on the player, never a
+# real app), the keyboard shortcuts (registered for a moment, then given up), the X-to-tray
+# option and the Start-with-Windows shortcut (written into a scratch folder, not the real
+# Startup folder). settings.txt gets a level and the last app written during this; the rig
+# puts it back as it was.
 Build-Rig
 New-Build $Rig.Src (Join-Path $Rig.Dir 'uitest.exe') -Main 'AppVolumeBoosterNs.UiTest' -Extra @(Join-Path $Rig.Lib 'UiTest.cs') | Out-Null
 $player = Start-Player 90

@@ -184,7 +184,10 @@ This utility **will not** be actively maintained, unless it becomes popular for 
 
 ## Optional Add-on: Per-App Volume Booster
 
-`VolumeBooster\AppVolumeBooster.exe` (optional, added 2026-08-23, multi-app update 2026-09-20, audit and rebuild 2026-09-30) boosts one or more chosen applications past 100% - up to 500% - and can optionally include Windows system sounds or all audio on the default device. No drivers, no admin rights, nothing installed; if you never run it, it changes nothing. 
+`VolumeBooster\AppVolumeBooster.exe` (optional, added 2026-08-23, multi-app update 2026-09-20, audit and rebuild 2026-09-30, tray and automatic boost 2026-10) boosts one or more chosen applications past 100% - up to 500% - and can optionally include Windows system sounds or all audio on the default device. It can sit in the tray, start a chosen app's boost by itself whenever that app plays, and be driven by keyboard shortcuts. No drivers, no admin rights, nothing installed; if you never run it, it changes nothing.
+
+![The booster window](VolumeBooster/booster-window.png)
+
 Full documentation, including how it interacts with the volume memory this kit protects, is in **VOLUME-BOOSTER.md**.
 
 ## Tests
