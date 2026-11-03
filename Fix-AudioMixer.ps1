@@ -30,6 +30,7 @@ USAGE (run in an elevated PowerShell window, or double-click Fix-AudioMixer.cmd)
 `.\Fix-AudioMixer.ps1 -RebuildStore` OPT-IN: Deletes the volume store and restarts the audio service, letting Windows rebuild it from scratch. (WARNING: Any running applications will have their volumes reset to 100%).
 `.\Fix-AudioMixer.ps1 -CleanGhostEndpoints` OPT-IN: Removes "ghost" audio endpoints that are marked as NOTPRESENT. (This process takes ownership of the keys and creates a backup first).
 `.\Fix-AudioMixer.ps1 -DisableEnhancements` OPT-IN: Turns off Audio Enhancements (sets Disable_SysFx=1) for every active output device.
+`.\Fix-AudioMixer.ps1 -EnableEnhancements` OPT-IN: Turns Audio Enhancements back on (Disable_SysFx=0) for every active output device - the undo of the switch above.
 `.\Fix-AudioMixer.ps1 -DisableBtAbsoluteVolume` OPT-IN: Disables Bluetooth absolute volume. (Requires a system reboot; affects only Bluetooth devices).
 `.\Fix-AudioMixer.ps1 -EnableBtAbsoluteVolume` OPT-IN: Restores Bluetooth absolute volume.
 #>
@@ -41,6 +42,7 @@ param(
     [switch]$RebuildStore,
     [switch]$CleanGhostEndpoints,
     [switch]$DisableEnhancements,
+    [switch]$EnableEnhancements,
     [switch]$DisableBtAbsoluteVolume,
     [switch]$EnableBtAbsoluteVolume,
     # Everything else on the command line lands here, so a misspelled switch is reported
@@ -106,6 +108,11 @@ $BrowserFeatures = @('AudioServiceSandbox', 'AudioServiceOutOfProcess')
 $BrowserExes  = @('thorium.exe','chrome.exe','msedge.exe','brave.exe','vivaldi.exe','opera.exe','browser.exe','chrome_proxy.exe','msedge_proxy.exe','vivaldi_proxy.exe')
 $BtCtKey      = 'HKLM:\SYSTEM\CurrentControlSet\Control\Bluetooth\Audio\AVRCP\CT'
 $BtCtReg      = 'HKLM\SYSTEM\CurrentControlSet\Control\Bluetooth\Audio\AVRCP\CT'
+# Sound control panel > Communications > "When Windows detects communications activity":
+# 0 = mute all other sounds, 1 = reduce them by 80% (the default when the value is absent),
+# 2 = reduce by 50%, 3 = do nothing. A value name known from the community, not from
+# Microsoft's documentation; it is only read here.
+$DuckingKey   = 'HKCU:\Software\Microsoft\Multimedia\Audio'
 $MMRender     = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render'
 $SysFxValue   = '{1da5d803-d492-4edd-8c23-e0c0ffee7f0e},5'   # PKEY_AudioEndpoint_Disable_SysFx: 1 = enhancements OFF
 $FxSlotFmtid  = 'd04e05a6-594b-4fb6-a80d-01af5eed7d1d'       # PKEY_FX_* effect-chain slots
@@ -488,7 +495,11 @@ function Show-Status([bool]$Deep) {
     Section 'Bluetooth absolute volume'
     if (Test-Path $BtCtKey) {
         $v = (Get-ItemProperty $BtCtKey -Name DisableAbsoluteVolume -ErrorAction SilentlyContinue).DisableAbsoluteVolume
-        if ($v -eq 1) { Report INFO 'DisableAbsoluteVolume = 1 (absolute volume is OFF - Windows controls volume in software).' }
+        if ($v -eq 1) {
+            Report INFO 'DisableAbsoluteVolume = 1 (absolute volume is OFF - Windows controls volume in software).'
+            # the one way this setting makes a headset QUIETER: its own volume counts again
+            Report INFO 'With absolute volume off, a Bluetooth headset''s own volume counts as well: at Windows 100% it plays only as loud as the headset itself is set. Turn the headset up with its own buttons once - or -EnableBtAbsoluteVolume (reboot) to give the Windows slider full control back.'
+        }
         else { Report INFO ("DisableAbsoluteVolume = {0} (absolute volume is ON - default). Only relevant for Bluetooth audio devices." -f $(if ($null -eq $v) { '<not set>' } else { $v })) }
     } else {
         Report INFO 'Bluetooth AVRCP key is absent (no Bluetooth audio stack has initialized).'
@@ -506,6 +517,10 @@ function Show-Status([bool]$Deep) {
         $sysfx = if ($fx) { $fx.$SysFxValue } else { $null }
         $fxState = if ($sysfx -eq 1) { 'enhancements OFF' } else { 'enhancements ON (default)' }
         Report INFO ("{0}  [{1}]" -f $ep.Name, $fxState)
+        # Off is a choice with a price: on a laptop, or with a vendor sound app (Dolby, DTS,
+        # Waves, Nahimic, Realtek), the enhancements include a loudness stage, and without it
+        # everything is noticeably quieter at 100%.
+        if ($sysfx -eq 1) { Report INFO ("    {0}: enhancements are OFF - on a laptop or with a vendor sound app that can make everything noticeably quieter at 100%. -EnableEnhancements turns them back on (reboot afterwards)." -f $ep.Name) }
         if ($fx) {
             $apos = @(Get-EffectClsids $fx | ForEach-Object { Resolve-ApoVendor $_ })
             # one line per DLL: a vendor usually registers several classes from one file
@@ -525,6 +540,14 @@ function Show-Status([bool]$Deep) {
             if ($apos.Count -eq 0) { Report INFO '    no effect APOs registered' }
         } else { Report INFO '    no FxProperties (no effects)' }
     }
+
+    Section 'Sounds during calls'
+    # Windows lowers every other sound while a communications stream is open (a call in
+    # Discord or a browser, a program with the microphone), by 80% unless told otherwise:
+    # "everything is quieter at 100%" with a call app open is this, not the store.
+    $duck = (Get-ItemProperty -Path $DuckingKey -Name UserDuckingPreference -ErrorAction SilentlyContinue).UserDuckingPreference
+    $duckText = switch ($duck) { 0 { 'MUTES every other sound' } 2 { 'lowers every other sound by 50%' } 3 { 'leaves other sounds alone' } default { 'lowers every other sound by 80% (the default)' } }
+    Report INFO ("While a call or a microphone app is active, Windows {0}. Sound control panel > Communications changes that; it is not a store setting." -f $duckText)
 
     Section 'Output devices / drivers'
     $stale = @($eps | Where-Object { $_.State -ne 1 })
@@ -1029,9 +1052,17 @@ function Set-BtAbsoluteVolume([bool]$Disable) {
     Report WARN 'A REBOOT is required for the Bluetooth stack to apply this. After disabling: set the headset hardware volume near max just once, then use Windows sliders.'
 }
 
-# ---- OPT-IN: disable audio enhancements per active endpoint ----------------
-function Disable-Enhancements {
-    Section 'Disable Audio Enhancements on every ACTIVE output (Disable_SysFx = 1)'
+# ---- OPT-IN: audio enhancements off (and on again) per active endpoint ------
+# -DisableEnhancements had no undo in the kit: the README sent people to the registry or to
+# the Settings toggle. On a laptop the enhancements carry the loudness stage, so "everything
+# is half as loud since I ran the script" needs a one-line way back.
+function Disable-Enhancements { Set-Enhancements $true }
+function Enable-Enhancements { Set-Enhancements $false }
+
+function Set-Enhancements([bool]$Off) {
+    $word = if ($Off) { 'OFF' } else { 'ON' }
+    $want = if ($Off) { 1 } else { 0 }
+    Section ("{0} Audio Enhancements on every ACTIVE output (Disable_SysFx = {1})" -f $(if ($Off) { 'Disable' } else { 'Enable' }), $want)
     # the preview only reads, so it needs no admin rights
     if (-not $Elevated -and -not $CheckOnly) { Report FAIL 'Requires admin (HKLM value write). Re-run this command from an elevated PowerShell window.'; return }
     $active = @(Get-ActiveRenderEndpoints | Where-Object { $_.State -eq 1 })
@@ -1042,10 +1073,11 @@ function Disable-Enhancements {
         # write succeeded, [OK] was printed, and Windows never looked there, so the
         # enhancements stayed on.
         $propsPath = Join-Path $ep.Path 'FxProperties'
-        if (-not (Test-Path -LiteralPath $propsPath)) { Report OK ("{0}: no effects are registered for this output, so there is nothing to turn off." -f $ep.Name); continue }
+        if (-not (Test-Path -LiteralPath $propsPath)) { Report OK ("{0}: no effects are registered for this output, so there is nothing to turn {1}." -f $ep.Name, $word.ToLower()); continue }
         $cur = (Get-ItemProperty -LiteralPath $propsPath -ErrorAction SilentlyContinue).$SysFxValue
-        if ($cur -eq 1) { Report OK ("{0}: enhancements already OFF." -f $ep.Name); continue }
-        if ($CheckOnly) { Report INFO ("WOULD set enhancements OFF for: {0}" -f $ep.Name); continue }
+        # absent means on: Windows writes the value only when the toggle has been used
+        if ($cur -eq $want -or (-not $Off -and $null -eq $cur)) { Report OK ("{0}: enhancements already {1}." -f $ep.Name, $word); continue }
+        if ($CheckOnly) { Report INFO ("WOULD set enhancements {0} for: {1}" -f $word, $ep.Name); continue }
         Ensure-BackupDir
         $bk = Join-Path $BackupDir ('endpoint.' + $ep.Guid.Trim('{}') + '.' + (Stamp) + '.reg')
         & reg.exe export ("HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render\" + $ep.Guid) $bk /y | Out-Null
@@ -1056,12 +1088,12 @@ function Disable-Enhancements {
             continue
         }
         try {
-            Set-ItemProperty -LiteralPath $propsPath -Name $SysFxValue -Value 1 -Type DWord
-            Report OK ("{0}: enhancements set OFF (backup of endpoint key saved)." -f $ep.Name)
+            Set-ItemProperty -LiteralPath $propsPath -Name $SysFxValue -Value $want -Type DWord
+            Report OK ("{0}: enhancements set {1} (backup of endpoint key saved)." -f $ep.Name, $word)
         } catch { Report WARN ("{0}: value write failed: {1}. Use the Settings toggle instead (README)." -f $ep.Name, $_.Exception.Message) }
     }
     if (-not $CheckOnly) { Report INFO 'Reboot (or restart the Windows Audio service - which resets live app volumes to 100%) for this to take effect.' }
-    Report INFO 'Note: OEM audio apps/services (Nahimic, Dolby, DTS, Waves...) may flip enhancements back on - see README to stop them.'
+    if ($Off) { Report INFO 'Note: OEM audio apps/services (Nahimic, Dolby, DTS, Waves...) may flip enhancements back on - see README to stop them.' }
 }
 
 # Every step runs under $ErrorActionPreference = 'Stop'. An error nobody anticipated inside
@@ -1099,6 +1131,7 @@ $exclusive = @(@(
     @{ N = 'RebuildStore';            V = $RebuildStore },
     @{ N = 'CleanGhostEndpoints';     V = $CleanGhostEndpoints },
     @{ N = 'DisableEnhancements';     V = $DisableEnhancements },
+    @{ N = 'EnableEnhancements';      V = $EnableEnhancements },
     @{ N = 'DisableBtAbsoluteVolume'; V = $DisableBtAbsoluteVolume },
     @{ N = 'EnableBtAbsoluteVolume';  V = $EnableBtAbsoluteVolume }
 ) | Where-Object { $_.V } | ForEach-Object { $_.N })
@@ -1112,6 +1145,7 @@ $modeName = if ($Status) { 'Status/diagnosis' }
     elseif ($RebuildStore) { 'Rebuild store' }
     elseif ($CleanGhostEndpoints) { 'Clean ghost endpoints' }
     elseif ($DisableEnhancements) { 'Disable enhancements' }
+    elseif ($EnableEnhancements) { 'Enable enhancements' }
     elseif ($DisableBtAbsoluteVolume) { 'Disable BT absolute volume' }
     elseif ($EnableBtAbsoluteVolume) { 'Enable BT absolute volume' }
     elseif ($CheckOnly) { 'CheckOnly (no changes)' }
@@ -1126,6 +1160,7 @@ elseif ($Revert)                  { Invoke-Step 'Revert browser flags'    { Fix-
 elseif ($RebuildStore)            { Invoke-Step 'Rebuild store'           { Rebuild-Store } }
 elseif ($CleanGhostEndpoints)     { Invoke-Step 'Clean ghost endpoints'   { Clean-GhostEndpoints } }
 elseif ($DisableEnhancements)     { Invoke-Step 'Disable enhancements'    { Disable-Enhancements } }
+elseif ($EnableEnhancements)      { Invoke-Step 'Enable enhancements'     { Enable-Enhancements } }
 elseif ($DisableBtAbsoluteVolume) { Invoke-Step 'Bluetooth absolute volume' { Set-BtAbsoluteVolume $true } }
 elseif ($EnableBtAbsoluteVolume)  { Invoke-Step 'Bluetooth absolute volume' { Set-BtAbsoluteVolume $false } }
 else {

@@ -39,5 +39,11 @@ Assert ($code -match 'Get-EffectClsids \$fx') 'and takes its list from Get-Effec
 
 Write-Host '  -- where the enhancements switch is read --'
 Assert ($code -match '\$fx\.\$SysFxValue' -and $code -notmatch '\$props\.\$SysFxValue') 'Show-Status reads the switch from FxProperties, not from Properties'
+# "everything is quieter at 100%" has three causes the status can see: the enhancements
+# (their loudness stage) off, a Bluetooth headset with absolute volume off, and Windows
+# lowering other sounds during a call. Each gets a line that names the way back.
+Assert ($code -match "sysfx -eq 1\) \{ Report INFO .*-EnableEnhancements") 'enhancements OFF comes with the note that this can make the output quieter, and the switch that undoes it'
+Assert ($code -match "v -eq 1\) \{" -and $code -match 'own volume counts as well.*-EnableBtAbsoluteVolume') 'Bluetooth absolute volume OFF comes with the note about the headset''s own volume'
+Assert ($code -match 'UserDuckingPreference' -and $code -match "2 \{ 'lowers every other sound by 50%' \}") 'the status reads what Windows does to other sounds during a call'
 
 Complete-Test

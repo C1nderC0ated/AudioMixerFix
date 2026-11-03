@@ -5,8 +5,9 @@ trap { Write-Host ('    FAIL  harness error: ' + $_); $global:AnyFail = $true; c
 # verified backup - and writes the switch where Windows reads it, the endpoint's
 # FxProperties key (it used to write it under Properties, print [OK], and change nothing) -
 # the BleachBit rule is not edited under a running BleachBit, and the store's integrity
-# label is re-applied unless it is exactly the one Windows uses. The "registry" here is the
-# test key; reg.exe is a stub.
+# label is re-applied unless it is exactly the one Windows uses. -EnableEnhancements is the
+# undo of the first (there was none; the README sent people to the registry), through the
+# same function. The "registry" here is the test key; reg.exe is a stub.
 $Elevated = $true; $CheckOnly = $false
 $BackupDir = New-TestScratch 'bk'
 function Ensure-BackupDir { }
@@ -14,7 +15,7 @@ function Test-PerUserAllowed { $true }
 $root = "$TestKey\optin"
 
 Write-Host '  -- -DisableEnhancements with a failing backup --'
-. ([scriptblock]::Create((Get-ShippedFunction 'Disable-Enhancements')))
+foreach ($f in 'Set-Enhancements', 'Disable-Enhancements', 'Enable-Enhancements') { . ([scriptblock]::Create((Get-ShippedFunction $f))) }
 New-Item -Path "$root\ep\Properties" -Force | Out-Null
 New-Item -Path "$root\ep\FxProperties" -Force | Out-Null
 $SysFxValue = '{1da5d803-d492-4edd-8c23-e0c0ffee7f0e},5'
@@ -48,6 +49,26 @@ Reset-Log
 Disable-Enhancements
 Assert ((Count-Reports '`[FAIL`] Requires admin*') -eq 1 -and $null -eq (Get-ItemProperty "$root\ep\FxProperties" -ErrorAction SilentlyContinue).$SysFxValue) 'the real run still refuses without elevation, and writes nothing'
 $Elevated = $true
+
+Write-Host '  -- -EnableEnhancements, the way back --'
+Reset-Log
+Enable-Enhancements
+Assert ((Count-Reports '`[OK`]*enhancements already ON*') -eq 1 -and $null -eq (Get-ItemProperty "$root\ep\FxProperties" -ErrorAction SilentlyContinue).$SysFxValue) 'an output that never had the switch is already on - nothing is written'
+Disable-Enhancements
+Reset-Log; $CheckOnly = $true
+Enable-Enhancements
+$CheckOnly = $false
+Assert ((Count-Reports '`[INFO`] WOULD set enhancements ON for: Speakers (fake)') -eq 1 -and (Get-ItemProperty "$root\ep\FxProperties").$SysFxValue -eq 1) '-CheckOnly says what it would do and leaves the switch off'
+Reset-Log; $global:ExportFails = $true
+Enable-Enhancements
+Assert ((Count-Reports '`[FAIL`]*backup of the endpoint key FAILED*') -eq 1 -and (Get-ItemProperty "$root\ep\FxProperties").$SysFxValue -eq 1) 'a failed backup stops it too'
+Reset-Log; $global:ExportFails = $false
+Enable-Enhancements
+Assert ((Get-ItemProperty "$root\ep\FxProperties").$SysFxValue -eq 0 -and (Count-Reports '`[OK`]*enhancements set ON (backup of endpoint key saved)*') -eq 1) 'with a good backup the switch is set back to 0, and the run says so'
+Assert ((Count-Reports '*OEM audio apps*') -eq 0) 'the note about OEM apps flipping it back on belongs to the other direction'
+Reset-Log
+Enable-Enhancements
+Assert ((Count-Reports '`[OK`]*enhancements already ON*') -eq 1) 'a second run finds it on'
 
 Write-Host '  -- the BleachBit rule while BleachBit is open --'
 . ([scriptblock]::Create((Get-ShippedFunction 'Fix-BleachBit')))
