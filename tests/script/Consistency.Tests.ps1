@@ -136,6 +136,13 @@ $docs = @(Get-ChildItem -LiteralPath $Kit -Recurse -File -Filter *.md)
 $badDocs = @($docs | Where-Object { $b = [IO.File]::ReadAllBytes($_.FullName); ($b.Length -ge 3 -and $b[0] -eq 0xEF -and $b[1] -eq 0xBB) -or (@($b | Where-Object { $_ -eq 13 }).Count -gt 0) } | ForEach-Object { $_.Name })
 Assert ($docs.Count -ge 3 -and $badDocs.Count -eq 0) ('{0} Markdown files, LF and no BOM{1}' -f $docs.Count, $(if ($badDocs) { ': ' + ($badDocs -join ', ') } else { '' }))
 
+Write-Host '  -- what the README tells a reader to type --'
+$quick = @($readme -split "`n" | Where-Object { $_ -match 'for a complete diagnosis' })
+Assert ($quick.Count -eq 1 -and $quick[0] -match 'powershell -NoProfile -ExecutionPolicy Bypass -File \.\\Fix-AudioMixer\.ps1 -Status') 'the Quick Guide''s -Status line uses the launcher''s bypass form (a downloaded copy run as .\Fix-AudioMixer.ps1 is refused by the execution policy)'
+$std = @($readme -split "`n" | Where-Object { $_ -match 'standard \(non-admin\) account' -and $_ -match 'per-user steps' })
+Assert ($std.Count -eq 1 -and $std[0] -match '-ExecutionPolicy Bypass -File \.\\Fix-AudioMixer\.ps1') 'so does the standard-account note'
+Assert ($readme -match '\]\(https://github\.com/C1nderC0ated/AudioMixerFix/releases/latest\)') 'the README links to the latest release'
+
 Write-Host '  -- tests\README.md lists every test file --'
 $testsDir = Join-Path $Kit 'tests'
 $onDisk = @(Get-ChildItem -LiteralPath $testsDir -Recurse -File -Filter '*.Tests.ps1' | ForEach-Object { $_.Directory.Name + '\' + $_.Name })

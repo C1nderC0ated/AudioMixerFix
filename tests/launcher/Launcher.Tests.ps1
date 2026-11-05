@@ -10,6 +10,10 @@ $psLine = @($src -split "`r`n" | Where-Object { $_.StartsWith('powershell -NoPro
 Assert ($psLine.Count -eq 1) 'found the launcher''s elevation line'
 $psLine = $psLine[0]
 $work = 'powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0Fix-AudioMixer.ps1"'
+# the whole line: the declined message quotes the same command inside an echo, and that
+# copy must stay as it is while the worker line becomes a stub
+$workLine = "`r`n" + $work + "`r`n"
+Assert (([regex]::Matches($src, [regex]::Escape($workLine))).Count -eq 1) 'found the worker line'
 $scratch = New-TestScratch 'launcher'
 $ascii = New-Object Text.ASCIIEncoding
 
@@ -41,7 +45,7 @@ Set-Content -LiteralPath (Join-Path $scratch 'Fix-AudioMixer.ps1') -Value '# sta
 function Invoke-Launcher([string]$name, [int]$fltmc, [int]$ps) {
     $t = $src.Replace('fltmc >nul 2>&1', "cmd /c exit $fltmc")
     $t = $t.Replace($psLine, "echo [WOULD-ELEVATE] & cmd /c exit $ps")
-    $t = $t.Replace($work, 'echo [WORKER-RAN] & cmd /c exit 0').Replace('pause', 'echo [PAUSE-REACHED]')
+    $t = $t.Replace($workLine, "`r`necho [WORKER-RAN] & cmd /c exit 0`r`n").Replace('pause', 'echo [PAUSE-REACHED]')
     # every substitution must apply, or the case would quietly test something else
     if ($t.Contains('fltmc >nul') -or ([regex]::Matches($t, '\[WOULD-ELEVATE\]')).Count -ne 1 -or ([regex]::Matches($t, '\[WORKER-RAN\]')).Count -ne 1) { throw "stub substitution did not apply ($name)" }
     $p = Join-Path $scratch "launcher_$name.cmd"
@@ -56,6 +60,7 @@ $r = Invoke-Launcher 'accepted' 1 0
 Assert (($r.Code -eq 0) -and ($r.Out -notmatch '\[FAIL\]') -and ($r.Out -notmatch '\[PAUSE-REACHED\]')) 'elevation started -> quiet exit 0'
 $r = Invoke-Launcher 'declined' 1 1
 Assert (($r.Code -eq 1) -and ($r.Out -match 'declined or failed') -and ($r.Out -notmatch 'network drive')) 'UAC declined -> its own message, exit 1'
+Assert (($r.Out -match '-ExecutionPolicy Bypass -File "[^"]+\\Fix-AudioMixer\.ps1"') -and ($r.Out -match [regex]::Escape($scratch))) '... naming the exact line to run instead, with this copy''s own path (it said "run Fix-AudioMixer.ps1 from an elevated window", where a downloaded copy is refused by the execution policy)'
 $r = Invoke-Launcher 'netdrive' 1 2
 Assert (($r.Code -eq 1) -and ($r.Out -match 'mapped network drive') -and ($r.Out -match '\[PAUSE-REACHED\]')) 'exit 2 -> the network-drive message, paused, exit 1'
 $r = Invoke-Launcher 'pctpath' 1 3
@@ -69,11 +74,12 @@ Write-Host '  -- the launcher on its own, as Explorer runs it from inside a ZIP 
 $lone = Join-Path $scratch 'lone'
 New-Item -ItemType Directory -Force -Path $lone | Out-Null
 $t = $src.Replace('fltmc >nul 2>&1', 'cmd /c exit 1').Replace($psLine, 'echo [WOULD-ELEVATE] & cmd /c exit 0')
-$t = $t.Replace($work, 'echo [WORKER-RAN] & cmd /c exit 0').Replace('pause', 'echo [PAUSE-REACHED]')
+$t = $t.Replace($workLine, "`r`necho [WORKER-RAN] & cmd /c exit 0`r`n").Replace('pause', 'echo [PAUSE-REACHED]')
 [IO.File]::WriteAllText((Join-Path $lone 'Fix-AudioMixer.cmd'), $t, $ascii)
 $r = Invoke-Batch (Join-Path $lone 'Fix-AudioMixer.cmd')
 Assert (($r.Code -eq 1) -and ($r.Out -match 'Fix-AudioMixer\.ps1 is not in the folder') -and ($r.Out -match '\[PAUSE-REACHED\]')) 'without Fix-AudioMixer.ps1 next to it -> says so and what to do, paused, exit 1'
 Assert ($r.Out -notmatch '\[WOULD-ELEVATE\]|\[WORKER-RAN\]') '... before asking for elevation (it used to go through the prompt and end with PowerShell''s own error)'
+Assert (($r.Out -match 'one by one') -and ($r.Out -match 'exactly that')) '... and covers files downloaded one by one, naming the exact file name to keep (it only spoke of a ZIP)'
 
 Write-Host '  -- the elevated relaunch, from folders with awkward names --'
 $psRun = $psLine.Replace('-Verb RunAs', '-Wait -WindowStyle Hidden')

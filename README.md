@@ -3,6 +3,8 @@
 Store this folder, and also keep a backup on external or cloud storage (since a system reset will delete everything on C:\). 
 After reinstalling Windows, copy it back and then run just one file.
 
+**Download:** the [latest release](https://github.com/C1nderC0ated/AudioMixerFix/releases/latest) has everything as one zip, and the booster, the script and its launcher as single files. (Code > Download ZIP gives the whole repository, tests included.)
+
 ## Quick Guide
 
 1. Double-click the file **`Fix-AudioMixer.cmd`** (and approve the administrator prompt).
@@ -10,7 +12,7 @@ After reinstalling Windows, copy it back and then run just one file.
 3. First, test with an app that is not a web browser (like a media player or a game). When that works, you are finished.
 4. For a Chromium browser: close it completely after the script has run, and start it again from its shortcut. The fix only reaches a browser that was started with it (details below).
 
-If an issue still occurs, open PowerShell and run `.\Fix-AudioMixer.ps1 -Status` for a complete diagnosis. 
+If an issue still occurs, open PowerShell in this folder and run `powershell -NoProfile -ExecutionPolicy Bypass -File .\Fix-AudioMixer.ps1 -Status` for a complete diagnosis. That form runs a downloaded copy of the script without changing any setting; a bare `.\Fix-AudioMixer.ps1` is refused on a PC that has never allowed scripts. 
 This will check the store variant, Bluetooth settings, audio effects (APOs), and devices. 
 Afterward, check the table of symptoms below.
 
@@ -90,6 +92,7 @@ The `-Status` command shows whether this component is installed, as information 
 You can run this script multiple times without issues. It saves everything it changes to a `backups\` folder located next to the script (wherever you place the kit). If that folder cannot be written to (for example, the kit is on a write-protected USB stick or a read-only share), the backups go to `%LOCALAPPDATA%\AudioMixerFix\backups` instead, and the script tells you so. If no backup can be written anywhere, the steps that need one are reported as `[FAIL]` and change nothing. 
 An unexpected error inside one step does not stop the whole run: it shows up as a `[FAIL]` line naming that step, and the remaining steps and the Summary still run. 
 It works correctly regardless of your system's language settings (for example, on Cyrillic Windows) because it uses SIDs and service names and never interprets localized output.
+The commands below are written as `.\Fix-AudioMixer.ps1 ...`. On a PC where PowerShell has never been allowed to run scripts, a downloaded copy is refused in that form; run it as `powershell -NoProfile -ExecutionPolicy Bypass -File .\Fix-AudioMixer.ps1 <switch>`, which bypasses the policy for that one run only (the launcher does the same).
 
 | Command | What it does |
 |---|---|
@@ -107,7 +110,7 @@ It works correctly regardless of your system's language settings (for example, o
 The `-CheckOnly` command can be combined with the optional switches. For example, you can use `.\Fix-AudioMixer.ps1 -DisableEnhancements -CheckOnly`. 
 Only one action switch runs per invocation. Passing two that contradict each other (say `-DisableBtAbsoluteVolume -EnableBtAbsoluteVolume`) is refused by name rather than silently running whichever comes first. 
 Exit codes: **0** nothing failed, **1** at least one `[FAIL]` line, **2** the command line itself was wrong - an unknown or misspelled switch (named in the message, with the list of valid ones), or two action switches at once. 
-On a **standard (non-admin) account**, approving the prompt with an administrator's password runs the script as *that* administrator. The per-user steps - volume store, BleachBit rule, browser shortcuts - are then skipped with a `[FAIL]` instead of being applied to the administrator's profile; run `.\Fix-AudioMixer.ps1` from an ordinary PowerShell window for those (they need no admin rights). 
+On a **standard (non-admin) account**, approving the prompt with an administrator's password runs the script as *that* administrator. The per-user steps - volume store, BleachBit rule, browser shortcuts - are then skipped with a `[FAIL]` instead of being applied to the administrator's profile; run the script from an ordinary PowerShell window for those (they need no admin rights), as `powershell -NoProfile -ExecutionPolicy Bypass -File .\Fix-AudioMixer.ps1` - the form the Quick Guide gives. 
 Run the kit from a local drive: an elevated window cannot see a drive letter mapped in your session, so `Fix-AudioMixer.cmd` refuses to start from a mapped network drive and says so. If BleachBit is open, close it first - while it runs it can save its settings over the fix, so the script leaves its config alone and tells you.
 
 ---

@@ -37,7 +37,9 @@ rem case, a folder such as "a^b%%X%%c" was refused although nothing in it would 
 rem Double-clicked inside a ZIP archive, Explorer extracts this one file to a temporary
 rem folder and runs it there - without the script. That used to go through the
 rem administrator prompt and end with PowerShell's own error text and "Review the [FAIL]
-rem lines above". Checked first, so it is said before anything is asked for.
+rem lines above". Checked first, so it is said before anything is asked for. The same
+rem happens to a copy downloaded on its own, or next to a script the browser saved as
+rem "Fix-AudioMixer (1).ps1", so the message covers that case too.
 if not exist "%~dp0Fix-AudioMixer.ps1" goto :nops1
 
 if /i "%~1"=="--elevated" goto :elevated
@@ -81,8 +83,10 @@ exit /b 1
 :declined
 echo.
 echo [FAIL] Elevation was declined or failed - nothing was changed.
-echo        Approve the UAC prompt, or run Fix-AudioMixer.ps1 from an elevated
-echo        PowerShell window.
+echo        Run this file again and approve the administrator prompt. Or open an
+echo        elevated PowerShell window and run this line - it bypasses the execution
+echo        policy for that one run, so a downloaded copy of the script runs too:
+echo        powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0Fix-AudioMixer.ps1"
 pause
 exit /b 1
 
@@ -91,7 +95,10 @@ echo.
 echo [FAIL] Fix-AudioMixer.ps1 is not in the folder this file was started from:
 echo        "%~dp0"
 echo        If you opened it from inside a ZIP archive, extract the whole archive first
-echo        and run Fix-AudioMixer.cmd from the extracted folder. Nothing was changed.
+echo        and run Fix-AudioMixer.cmd from the extracted folder. If you downloaded the
+echo        files one by one, put Fix-AudioMixer.ps1 in that folder under exactly that
+echo        name (a browser saves a second download as "Fix-AudioMixer (1).ps1").
+echo        Nothing was changed.
 pause
 exit /b 1
 
