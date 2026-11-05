@@ -14,6 +14,7 @@ installation. If you never run it, it does nothing.
 | `VolumeBooster\AppVolumeBooster.cs` | Complete source code, one file. |
 | `VolumeBooster\Build-Booster.cmd` | Rebuilds the exe using the C# compiler that ships inside Windows - works even on a freshly reinstalled machine with no tools. It compiles to a temporary file and only then replaces the exe, so a failed rebuild leaves the working binary you already had and exits non-zero instead of reporting success. |
 | `%LocalAppData%\AppVolumeBooster\booster-state.txt` | Appears only while a boost is active (crash-recovery data, see below). Deleted automatically. There is one per Windows user, shared by every copy of the exe, wherever a copy sits - a read-only folder included. Written through a temporary file and an atomic replace, so killing the booster during the write cannot leave it truncated. (Only if that folder cannot be used does the note go next to the exe, and failing that to `%TEMP%`.) |
+| `%LocalAppData%\AppVolumeBooster\ducked-before.txt` | The apps the booster has ever held at 4%, with the level each had before (one line per app). Kept for good: it is what puts an app back that Windows saved at 4% (below). |
 | `%LocalAppData%\AppVolumeBooster\settings.txt` | What the window remembers: the app of your last boost (for **Start boost** in the tray), the level each app was last boosted at, the apps that are boosted automatically, the three Options, whether you switched **Auto-refresh** off, and that the "still running in the tray" notice was shown once. One short line each; there is no file until one of them is set. |
 | `%AppData%\Microsoft\Windows\Start Menu\Programs\Startup\App Volume Booster.lnk` | Exists only while **Start with Windows** (in Options) is on: a shortcut that starts the booster into the tray at logon. Switching the option off deletes it. |
 
@@ -78,7 +79,8 @@ multi-app uses the same restore path per target):
 |---|---|
 | You press Stop / close the booster | Sliders restored instantly. Verified. |
 | A boosted app exits or crashes while boosting | That app's saved volume is restored. If other selected apps remain, boosting continues; if it was the last one, the booster stops. Verified for the single-app case: the app came back at its old volume on relaunch. |
-| The booster itself is killed hard (or PC loses power) mid-boost | Windows may persist the 4%. The booster leaves a note in `booster-state.txt`; the next time ANY copy of the booster runs (and every few seconds while one is open), it finds each ducked app (and system sounds, if that was the target) and repairs the slider to the saved value. The note itself is written atomically, so a kill landing *during* that write leaves the previous contents intact rather than a half-written file. Verified, including kills timed into the write. |
+| The booster itself is killed hard (or PC loses power) mid-boost | Windows may persist the 4%. The booster leaves a note in `booster-state.txt`; the next time ANY copy of the booster runs (and every few seconds while one is open), it finds each ducked app (and system sounds, if that was the target) and repairs the slider to the saved value. The note itself is written atomically, so a kill landing *during* that write leaves the previous contents intact rather than a half-written file. Verified, including kills timed into the write. An error inside the booster that ends the process restores the sliders on the way out. |
+| Windows saved 4% for an app although no note is left (the restore came too late - the app closed in the same moment, a shutdown, a kill - or the note was removed because the restore reported success) | The app then starts at 4% every time; `-Status` lists it as "saved at 4%", and nothing outside the app's own session can change that: the audio service keeps its own copy of the level, so a value written into the store would be ignored (measured). The booster keeps `ducked-before.txt`, the apps it has ever held at 4% with their level before, and whenever such an app is seen at exactly 4% while the booster runs, or the next time it opens, the app is put back (on the second look, 5 s apart, so that a boost just starting is never mistaken for a leftover). Boosting the app again also ends at that level. An app at any other level, or one the booster never held, is not touched. |
 | A slider cannot be put back when the boost stops (the audio service was restarted under the booster) | The window and the log say so instead of reporting success, and the note is kept: the next booster start repairs the slider. Tested with a simulated failure. |
 | Nothing else available | Just drag the slider(s) back up in the Volume Mixer - they are ordinary volume values, nothing is locked. |
 
@@ -207,6 +209,11 @@ brackets); the audio tests again used only the private near-silent test process.
 - Added 2026-10-21: the automatic boost, the level remembered per app, the keyboard
   shortcuts, Start with Windows, the X button to the tray. UiRace covers each; the automatic
   boost and the shortcuts are exercised on the private player.
+- Added 2026-11-05, from a report of "everything is half as loud at 100% until I open the
+  booster" (five apps saved at 4% in that machine's store): the list of apps ever held at
+  4%, the repair from it, the real level after a boost of an app found at 4%, and the
+  restore on a crash. Measured on the way: the audio service does not re-read a level
+  written into the store - the repair has to reach the live session. SelfHeal covers it.
 - The exe in the kit had not been rebuilt since 2026-09-23 while its source was being fixed,
   and no test could notice. The build test now compares the shipped exe with a fresh build.
 

@@ -870,7 +870,56 @@ namespace AppVolumeBoosterNs
                 });
                 lines.Add(own + "|" + targetExe + "|" + prior.ToString("F4", CultureInfo.InvariantCulture));
                 WriteAll(lines);
+                Remember(targetExe, prior);
             });
+        }
+
+        // ---- the apps the booster has ever held at 4%, with the level each had before ----
+        // Kept for good ("exe|prior", one line per app, next to the note), unlike the note,
+        // which goes once a restore is reported done. Windows saves an app's level when the
+        // app closes, and a restore that reaches the session too late - the app closing in
+        // the same moment, a shutdown, a kill - leaves 4% saved with no note left to say so:
+        // from then on the app starts at 4% every time, which is what "everything is half as
+        // loud until I open the booster" was. This list is what puts such an app back.
+        static string HistoryPath()
+        {
+            return System.IO.Path.Combine(System.IO.Path.GetDirectoryName(PathOf()), "ducked-before.txt");
+        }
+
+        static Dictionary<string, float> ReadHistory()
+        {
+            Dictionary<string, float> d = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                string p = HistoryPath();
+                if (!File.Exists(p)) return d;
+                foreach (string l in File.ReadAllLines(p))
+                {
+                    string[] parts = l.Split('|');
+                    float v;
+                    if (parts.Length == 2 && float.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out v)) d[parts[0]] = v;
+                }
+            }
+            catch { }
+            return d;
+        }
+
+        // Called under the lock, by AddOwn. The duck level itself is never recorded as a
+        // level to go back to.
+        static void Remember(string targetExe, float prior)
+        {
+            if (prior <= BoostEngine.DUCK + 0.01f) return;
+            try
+            {
+                Dictionary<string, float> d = ReadHistory();
+                float old;
+                if (d.TryGetValue(targetExe, out old) && Math.Abs(old - prior) < 0.0005f) return;
+                d[targetExe] = prior;
+                List<string> lines = new List<string>();
+                foreach (KeyValuePair<string, float> kv in d) lines.Add(kv.Key + "|" + kv.Value.ToString("F4", CultureInfo.InvariantCulture));
+                File.WriteAllLines(HistoryPath(), lines.ToArray());
+            }
+            catch { }
         }
 
         public static void RemoveOwn()
@@ -948,6 +997,10 @@ namespace AppVolumeBoosterNs
                 float p;
                 if (float.TryParse(parts[2], NumberStyles.Float, CultureInfo.InvariantCulture, out p)) { prior = p; return true; }
             }
+            // no note, but the app was held at 4% by a boost before: that boost's prior. A
+            // boost of an app saved at 4% used to restore it to 4% again when it ended.
+            float h;
+            if (ReadHistory().TryGetValue(targetExe, out h)) { prior = h; return true; }
             return false;
         }
 
@@ -971,30 +1024,41 @@ namespace AppVolumeBoosterNs
         // Restore mixer sliders left ducked by a dead (or orphan-marked) booster line.
         // Lines whose app is not currently visible are KEPT so a later run can heal
         // them once the app reappears; lines whose app is seen healthy are resolved.
-        public static string SelfHeal()
+        // Then the list of apps ever held at 4%: one of them found at exactly 4% with no
+        // note speaking for it is put back too - on the second pass that sees it so (a
+        // boost that is just starting may not have written its note yet).
+        public static string SelfHeal() { return SelfHeal(true); }
+
+        static readonly Dictionary<string, int> seenDucked = new Dictionary<string, int>();   // session -> passes seen at 4%
+
+        public static string SelfHeal(bool withHistory)
         {
             List<string> healedNames = new List<string>();
             UnderLock(delegate()
             {
                 List<string> lines = ReadAll();
-                if (lines.Count == 0) return;
+                Dictionary<string, float> hist = withHistory ? ReadHistory() : new Dictionary<string, float>();
+                if (lines.Count == 0 && hist.Count == 0) return;
                 List<string> keep = new List<string>();
                 List<string[]> dead = new List<string[]>();
                 List<string> heldByLive = new List<string>();
+                List<string> noted = new List<string>();   // every app a note line speaks for
                 foreach (string l in lines)
                 {
                     string[] parts = l.Split('|');
                     if (parts.Length != 3) continue;
+                    noted.Add(parts[1]);
                     int bpid;
                     bool alive = false;
                     // a live booster is recognised by the event it holds, not by its exe name
                     if (int.TryParse(parts[0], out bpid) && bpid > 0) alive = Native.IsBoosterPid((uint)bpid);
                     if (alive) { keep.Add(l); heldByLive.Add(parts[1]); } else dead.Add(parts);
                 }
-                if (dead.Count > 0)
+                if (dead.Count > 0 || hist.Count > 0)
                 {
                     bool[] resolved = new bool[dead.Count];
                     bool[] failed = new bool[dead.Count];
+                    List<string> seenNow = new List<string>();
                     try
                     {
                         List<IAudioSessionControl> all = Native.AllRenderSessions();
@@ -1005,6 +1069,7 @@ namespace AppVolumeBoosterNs
                             uint spid; sc2.GetProcessId(out spid);
                             string sname = Native.ProcessNameOf(spid);
                             bool isSys = Native.IsSystemSounds(sc2) || spid == 0;
+                            if (hist.Count > 0) HistoryPass(sc, sc2, spid, sname, isSys, hist, noted, heldByLive, healedNames, seenNow);
                             for (int di = 0; di < dead.Count; di++)
                             {
                                 // EVERY session of that name is checked, not only the first: with
@@ -1036,6 +1101,8 @@ namespace AppVolumeBoosterNs
                                 resolved[di] = true;
                             }
                         }
+                        // a session no longer at 4%, or gone, starts its count over
+                        foreach (string k in new List<string>(seenDucked.Keys)) if (!seenNow.Contains(k)) seenDucked.Remove(k);
                     }
                     catch { }
                     for (int di = 0; di < dead.Count; di++)
@@ -1045,12 +1112,46 @@ namespace AppVolumeBoosterNs
                 // to rewrite the file each time for the whole length of a boost.
                 bool same = keep.Count == lines.Count;
                 for (int i = 0; same && i < keep.Count; i++) same = keep[i] == lines[i];
-                if (!same) WriteAll(keep);
+                if (!same && lines.Count > 0) WriteAll(keep);
             });
             if (healedNames.Count == 0) return null;
             for (int i = 0; i < healedNames.Count; i++)
                 if (healedNames[i] == K.SysSoundsName) healedNames[i] = "system sounds";
             return string.Join(", ", healedNames.ToArray());
+        }
+
+        // The list's part of a pass, for one session: an app the booster has held at 4%
+        // before, at exactly 4% now, with no note speaking for it and no live booster
+        // holding it. Put back to its recorded level on the second pass in a row that finds
+        // it so. A level the user chose is not touched: only exactly the duck level counts,
+        // and only for apps that were boosted before.
+        static void HistoryPass(IAudioSessionControl sc, IAudioSessionControl2 sc2, uint spid, string sname, bool isSys,
+            Dictionary<string, float> hist, List<string> noted, List<string> heldByLive, List<string> healedNames, List<string> seenNow)
+        {
+            try
+            {
+                string key = null; float prior = 0;
+                foreach (KeyValuePair<string, float> kv in hist)
+                    if (LineMatchesSession(kv.Key, spid, sname, isSys)) { key = kv.Key; prior = kv.Value; break; }
+                if (key == null) return;
+                foreach (string n in noted) if (SameTarget(n, key)) return;
+                foreach (string hx in heldByLive) if (SameTarget(hx, key)) return;
+                int st; sc2.GetState(out st);
+                if (st == K.StateExpired) return;
+                ISimpleAudioVolume v = (ISimpleAudioVolume)sc;
+                float cur; v.GetMasterVolume(out cur);
+                if (cur < BoostEngine.DUCK - 0.005f || cur > BoostEngine.DUCK + 0.005f) return;
+                string inst = null;
+                try { sc2.GetSessionInstanceIdentifier(out inst); } catch { }
+                if (inst == null) inst = "pid:" + spid.ToString();
+                seenNow.Add(inst);
+                int passes; seenDucked.TryGetValue(inst, out passes); passes++; seenDucked[inst] = passes;
+                if (passes < 2) return;
+                if (v.SetMasterVolume(prior, IntPtr.Zero) < 0) return;
+                seenDucked.Remove(inst);
+                if (!healedNames.Contains(key)) healedNames.Add(key);
+            }
+            catch { }
         }
     }
 
@@ -3318,6 +3419,13 @@ namespace AppVolumeBoosterNs
             Close();
         }
 
+        // The last thing before the process dies of an error: the sliders back.
+        internal void EmergencyStop()
+        {
+            BoostEngine e = engine;
+            if (e != null) { try { e.Stop(true); } catch { } }
+        }
+
         // ---- the gear ----
         void ShowOptions()
         {
@@ -3496,7 +3604,7 @@ namespace AppVolumeBoosterNs
             if (tickN % 5 == 0)
             {
                 string healed = null;
-                try { healed = StateFile.SelfHeal(); } catch { }
+                try { healed = StateFile.SelfHeal(idle); } catch { }
                 if (healed != null && idle)
                     Say(Theme.AccentLight, "Put " + healed + " back to its normal volume.", "A boost had ended without doing that.");
             }
@@ -4186,6 +4294,13 @@ namespace AppVolumeBoosterNs
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             form = new MainForm();
+            // an error nobody caught ends the process; the sliders it holds at 4% go back
+            // first (Windows would otherwise save 4% as the app's level)
+            AppDomain.CurrentDomain.UnhandledException += delegate
+            {
+                MainForm f = form;
+                if (f != null) f.EmergencyStop();
+            };
             if (inTray)
             {
                 // never shown until the icon is clicked; the context ends with the window

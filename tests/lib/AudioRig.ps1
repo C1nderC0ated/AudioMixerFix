@@ -9,7 +9,8 @@
 #   * The player's mixer volume and mute are read at start and put back BEFORE it exits:
 #     Windows saves an app's mixer state when it closes, so a player left at 4% or muted
 #     would change what every PowerShell window starts at.
-#   * The booster keeps its crash note in %LOCALAPPDATA%\AppVolumeBooster\booster-state.txt,
+#   * The booster keeps its crash note in %LOCALAPPDATA%\AppVolumeBooster\booster-state.txt
+#     (and settings.txt and ducked-before.txt beside it),
 #     the user's real one. It is read when this file is loaded and put back exactly as it
 #     was by Complete-Test, so no test can leave a line there for a later self-heal to act
 #     on. (Do not run the audio tests while you are boosting something yourself.)
@@ -37,11 +38,16 @@ $script:NoteDirExisted = Test-Path -LiteralPath $script:NoteDir
 $script:NoteBefore = if (Test-Path -LiteralPath $script:NoteFile) { [IO.File]::ReadAllText($script:NoteFile) } else { $null }
 $script:SettingsFile = Join-Path $script:NoteDir 'settings.txt'
 $script:SettingsBefore = if (Test-Path -LiteralPath $script:SettingsFile) { [IO.File]::ReadAllText($script:SettingsFile) } else { $null }
+# the list of apps the booster has ever held at 4% (every boost in these tests adds the player)
+$script:HistoryFile = Join-Path $script:NoteDir 'ducked-before.txt'
+$script:HistoryBefore = if (Test-Path -LiteralPath $script:HistoryFile) { [IO.File]::ReadAllText($script:HistoryFile) } else { $null }
 $script:Cleanups.Add({
     if ($null -ne $script:NoteBefore) { [IO.File]::WriteAllText($script:NoteFile, $script:NoteBefore) }
     elseif (Test-Path -LiteralPath $script:NoteFile) { Remove-Item -LiteralPath $script:NoteFile -Force }
     if ($null -ne $script:SettingsBefore) { [IO.File]::WriteAllText($script:SettingsFile, $script:SettingsBefore) }
     elseif (Test-Path -LiteralPath $script:SettingsFile) { Remove-Item -LiteralPath $script:SettingsFile -Force }
+    if ($null -ne $script:HistoryBefore) { [IO.File]::WriteAllText($script:HistoryFile, $script:HistoryBefore) }
+    elseif (Test-Path -LiteralPath $script:HistoryFile) { Remove-Item -LiteralPath $script:HistoryFile -Force }
     if (-not $script:NoteDirExisted -and (Test-Path -LiteralPath $script:NoteDir) -and -not (Get-ChildItem -LiteralPath $script:NoteDir -Force)) { Remove-Item -LiteralPath $script:NoteDir }
 })
 

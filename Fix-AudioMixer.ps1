@@ -345,7 +345,7 @@ function Show-StoreEntries($store) {
     if ($apps.Count -gt 40) { Write-Host ("      ... and {0} more apps" -f ($apps.Count - 40)) }
     foreach ($g in $apps) {
         if (@($g.Group | Where-Object { $null -ne $_.Vol -and $_.Vol -ge 0.035 -and $_.Vol -le 0.045 }).Count -gt 0) {
-            Report INFO ("{0} is saved at 4%. If you did not set that yourself: it is the level the volume booster holds an app at while it boosts, so a boost may have ended without putting it back - drag its slider back up in the Volume Mixer once it is playing." -f $g.Name)
+            Report INFO ("{0} is saved at 4%. If you did not set that yourself: it is the level the volume booster holds an app at while it boosts, so a boost may have ended without putting it back - drag its slider back up in the Volume Mixer once it is playing, or open the volume booster while the app plays: it puts back every app it has ever held at 4%." -f $g.Name)
         }
     }
 }

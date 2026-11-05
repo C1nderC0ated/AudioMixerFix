@@ -20,6 +20,8 @@ namespace AppVolumeBoosterNs
     //                                      "pid|parent|name" for each one running, "ask|pid|name"
     //                                      for each pid asked about, and how long both lookups take
     //   sleep <ms>                         just stay alive that long
+    //   heal  <n> <out>                    n passes of the booster's start-up repair (StateFile.SelfHeal),
+    //                                      200 ms apart; one line per pass with what it put back, or "-"
     //   claim <name> <ms> <out>            SingleWindow.Claim under a test name. First: writes
     //                                      "claimed", listens <ms> long, then "first shown=<n>"
     //                                      (n = how often a later start asked it to show).
@@ -75,6 +77,20 @@ namespace AppVolumeBoosterNs
                 return 0;
             }
             if (mode == "sleep") { Thread.Sleep(int.Parse(a[1], CultureInfo.InvariantCulture)); return 0; }
+            if (mode == "heal")
+            {
+                StringBuilder sb = new StringBuilder();
+                int n = int.Parse(a[1], CultureInfo.InvariantCulture);
+                for (int i = 0; i < n; i++)
+                {
+                    string r = null;
+                    try { r = StateFile.SelfHeal(); } catch (Exception ex) { r = "error: " + ex.Message; }
+                    sb.AppendLine(r ?? "-");
+                    Thread.Sleep(200);
+                }
+                File.WriteAllText(a[2], sb.ToString());
+                return 0;
+            }
             if (mode == "claim")
             {
                 if (!SingleWindow.Claim(a[1])) { File.WriteAllText(a[3], "second"); return 0; }

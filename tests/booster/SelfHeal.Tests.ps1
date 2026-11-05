@@ -8,8 +8,15 @@ trap { Write-Host ('    FAIL  harness error: ' + $_); $global:AnyFail = $true; c
 # own lines counted as dead (a live booster is now recognised by the event it holds, not
 # by its exe name); and two boosted apps of the same name, where one closing turned the
 # line they share into an orphan.
+# Then the list of apps the booster has ever held at 4% (ducked-before.txt): an app saved
+# at 4% because a restore came too late - the app closing in the same moment, a shutdown, a
+# kill - has no note left to say so, and used to start at 4% every time ("everything is half
+# as loud until I open the booster"). Such an app, found at exactly 4% with no note, is put
+# back on the second pass that sees it; one at any other level, or one the booster never
+# held, is left alone. And a boost of an app found at 4% ends at the level it really had.
 Build-Rig
 $state = $script:NoteFile
+$history = $script:HistoryFile
 $renamedDir = Join-Path $Rig.Dir 'renamed'
 New-Item -ItemType Directory -Force -Path $renamedDir | Out-Null
 Copy-Item -LiteralPath (Join-Path $Rig.Dir 'AppVolumeBooster.exe') -Destination (Join-Path $renamedDir 'Booster.exe')
@@ -59,6 +66,33 @@ try {
     $a.WaitForExit()
     Assert (Test-Restored $player $orig) 'and it was restored normally when the boost ended'
     Assert (-not (Test-Path -LiteralPath $state) -or (Get-Content -LiteralPath $state -Raw) -notmatch 'powershell') 'no line is left in the note afterwards - not even for the app that closed mid-boost'
+
+    Write-Host '  -- the list of apps ever held at 4%: an app saved at 4% with no note --'
+    $was = [regex]::Match($orig, 'vol=([0-9.]+)').Groups[1].Value
+    Assert ((Test-Path -LiteralPath $history) -and (Get-Content -LiteralPath $history -Raw) -match ('(?m)^powershell\|' + [regex]::Escape($was))) ('the boosts above put the player''s app on the list, with its real level ({0})' -f $(if (Test-Path -LiteralPath $history) { ((Get-Content -LiteralPath $history) -join ' / ') } else { '(no file)' }))
+    if (Test-Path -LiteralPath $state) { Remove-Item -LiteralPath $state -Force }
+    Probe set $player.Id 0.04 0 | Out-Null
+    Start-Sleep -Milliseconds 300
+    $passes = Probe heal 3
+    Write-Host ('     three repair passes: ' + (($passes -split "`r?`n") -join ' / '))
+    Assert (($passes -split "`r?`n")[0] -eq '-' -and ($passes -split "`r?`n")[1] -match 'powershell') 'the first pass only takes note, the second puts it back (a boost just starting may not have written its note yet)'
+    Assert (Test-Restored $player $orig) 'the player is back at its real level, although no note said so'
+    Probe set $player.Id 0.3 0 | Out-Null
+    Start-Sleep -Milliseconds 300
+    Probe heal 3 | Out-Null
+    Assert ((Probe get $player.Id) -match 'vol=0\.300') 'at any other level (30%) it is left alone - that is the user''s own setting'
+    $kept = [IO.File]::ReadAllText($history)
+    Remove-Item -LiteralPath $history -Force
+    Probe set $player.Id 0.04 0 | Out-Null
+    Start-Sleep -Milliseconds 300
+    Probe heal 3 | Out-Null
+    Assert ((Probe get $player.Id) -match 'vol=0\.040') 'an app the booster never held is left alone even at 4%'
+    [IO.File]::WriteAllText($history, $kept)
+
+    Write-Host '  -- a boost of an app found at 4% ends at the level the app really had --'
+    $r = Invoke-Booster @('--pid', $player.Id, '--boost', '100', '--seconds', '2')
+    Write-Host ('     log: ' + $r.Log)
+    Assert (Test-Restored $player $orig) ('after the boost the player is at {0}, not at the 4% it was found at' -f (Probe get $player.Id))
 }
 finally {
     Stop-Player $player $orig
