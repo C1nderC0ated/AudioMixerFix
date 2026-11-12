@@ -20,6 +20,23 @@ Assert ($w.Count -eq 0) ('32-bit build at warning level 4: {0} warning(s)' -f $w
 $bb = [IO.File]::ReadAllText((Join-Path $Kit 'VolumeBooster\Build-Booster.cmd'))
 Assert ($bb -match [regex]::Escape(($script:CscRefs -join ' '))) 'Build-Booster.cmd uses exactly the same three references'
 
+Write-Host '  -- the .NET Framework version it declares --'
+# The in-box compiler writes no target framework into an exe, and a program without one is
+# run with the behaviour of .NET Framework 4.0 (legacy path handling, none of the
+# accessibility work since 4.7.1 ...). The source declares its target itself, in an assembly
+# attribute. Asked here of a build of that source - the probe is the booster's source with
+# another Main - so the answer is what the runtime makes of it, plus one behaviour that
+# depends on it.
+$declared = [regex]::Match([IO.File]::ReadAllText($Rig.Src), '(?m)^\[assembly: System\.Runtime\.Versioning\.TargetFramework\("([^"]+)"')
+Assert $declared.Success 'the source declares a target framework'
+New-Build $Rig.Src (Join-Path $d 'probe.exe') -Main 'AppVolumeBoosterNs.Probes' -Console -Extra @(Join-Path $Rig.Lib 'Probes.cs') | Out-Null
+$tf = Join-Path $d 'target.txt'
+& (Join-Path $d 'probe.exe') target $tf | Out-Null
+$seen = if (Test-Path -LiteralPath $tf) { @([IO.File]::ReadAllLines($tf)) } else { @() }
+Write-Host ('     ' + ($seen -join ', '))
+Assert ($declared.Success -and $seen -contains ('target=' + $declared.Groups[1].Value)) 'the runtime sees that target in a build of the source'
+Assert ($seen -contains 'longPaths=accepted') 'and gives it current behaviour: a path over 260 characters is accepted (with no target declared it is refused, as in .NET Framework 4.0)'
+
 Write-Host '  -- the exe that ships is this source, built --'
 $shipSrc = Join-Path $Kit 'VolumeBooster\AppVolumeBooster.cs'
 if ($Rig.Src -ne $shipSrc) { Write-Host '     (another source is under test - skipped)' }

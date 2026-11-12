@@ -136,6 +136,18 @@ $docs = @(Get-ChildItem -LiteralPath $Kit -Recurse -File -Filter *.md)
 $badDocs = @($docs | Where-Object { $b = [IO.File]::ReadAllBytes($_.FullName); ($b.Length -ge 3 -and $b[0] -eq 0xEF -and $b[1] -eq 0xBB) -or (@($b | Where-Object { $_ -eq 13 }).Count -gt 0) } | ForEach-Object { $_.Name })
 Assert ($docs.Count -ge 3 -and $badDocs.Count -eq 0) ('{0} Markdown files, LF and no BOM{1}' -f $docs.Count, $(if ($badDocs) { ': ' + ($badDocs -join ', ') } else { '' }))
 
+Write-Host '  -- the .NET Framework version the booster is written for: every copy --'
+$tfm = [regex]::Match($cs, '(?m)^\[assembly: System\.Runtime\.Versioning\.TargetFramework\("\.NETFramework,Version=v([\d.]+)", FrameworkDisplayName = "([^"]+)"\)\]')
+Assert $tfm.Success 'the source declares its target framework'
+$fx = '.NET Framework ' + $tfm.Groups[1].Value
+Show 'declared' @($fx)
+Assert ($tfm.Success -and $tfm.Groups[2].Value -eq $fx) 'the display name in the declaration says the same version'
+Assert ($tfm.Success -and $cs.Substring(0, $cs.IndexOf('using System;')).Contains('Written for ' + $fx)) 'the comment at the top of the source names it'
+$exeRow = @($vbdoc -split "`n" | Where-Object { $_.StartsWith('| `VolumeBooster\AppVolumeBooster.exe`') })
+Assert ($tfm.Success -and $exeRow.Count -eq 1 -and $exeRow[0].Contains($fx)) 'VOLUME-BOOSTER.md names it in the row for the exe'
+$limit = @($vbdoc -split "`n" | Where-Object { $_ -match 'process-loopback capture' -and $_ -match 'only ever been run' })
+Assert ($tfm.Success -and $limit.Count -eq 1 -and $limit[0].Contains($fx)) 'and in its limitations'
+
 Write-Host '  -- what the README tells a reader to type --'
 $quick = @($readme -split "`n" | Where-Object { $_ -match 'for a complete diagnosis' })
 Assert ($quick.Count -eq 1 -and $quick[0] -match 'powershell -NoProfile -ExecutionPolicy Bypass -File \.\\Fix-AudioMixer\.ps1 -Status') 'the Quick Guide''s -Status line uses the launcher''s bypass form (a downloaded copy run as .\Fix-AudioMixer.ps1 is refused by the execution policy)'

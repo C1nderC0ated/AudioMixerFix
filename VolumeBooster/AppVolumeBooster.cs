@@ -6,6 +6,8 @@
 //   %WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe /t:winexe
 //       /r:System.Windows.Forms.dll /r:System.Drawing.dll /r:System.Management.dll
 //       AppVolumeBooster.cs
+// Written for .NET Framework 4.8.1, the last version - declared in an assembly attribute
+// below, because that compiler adds none by itself.
 //
 // HOW IT WORKS (duck-and-boost relay, verified end-to-end on Win11 24H2 26100.9168):
 //   1. Windows' process-loopback capture API (ActivateAudioInterfaceAsync +
@@ -50,6 +52,15 @@ using System.Management;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
+
+// The version of .NET Framework this program is written for: 4.8.1, the last one, part of
+// Windows 11 since 22H2. The in-box compiler adds no such declaration, and a program without
+// one is run with the behaviour .NET Framework 4.0 had. Measured on 4.8.1 with a probe built
+// both ways: legacy path handling, paths over 260 characters refused, no PNG frames in
+// icons, and none of the five rounds of accessibility work in Windows Forms (Narrator, high
+// contrast, tooltips). It states behaviour only: nothing compares it with the installed
+// version.
+[assembly: System.Runtime.Versioning.TargetFramework(".NETFramework,Version=v4.8.1", FrameworkDisplayName = ".NET Framework 4.8.1")]
 
 namespace AppVolumeBoosterNs
 {
@@ -575,7 +586,14 @@ namespace AppVolumeBoosterNs
                     if (GetExitCodeProcess(h, out code) && code != 259) return null;
                     System.Text.StringBuilder sb = new System.Text.StringBuilder(1024);
                     uint n = (uint)sb.Capacity;
-                    if (QueryFullProcessImageNameW(h, 0, sb, ref n) && n > 0)
+                    // 1 = PROCESS_NAME_NATIVE: the path the process was started from. With 0
+                    // Windows gives the exe file's name as it is NOW, and a program whose exe
+                    // an updater renames while it runs ("app.exe" to "app.exe.old-...") was
+                    // then known here under the new file name - not the one Get-Process shows,
+                    // and not the one its saved level and its automatic boost go by.
+                    // Only the last part of the path is used, so its native form
+                    // (\Device\HarddiskVolume3\...) makes no difference.
+                    if (QueryFullProcessImageNameW(h, 1, sb, ref n) && n > 0)
                     {
                         string f = sb.ToString();
                         int slash = f.LastIndexOf('\\');
@@ -592,6 +610,7 @@ namespace AppVolumeBoosterNs
         }
 
         // The full path of a process's exe, or null (not running, or it may not be asked).
+        // This one is the file as it is called now: the title and the icon are read from it.
         public static string ProcessPathOf(uint pid)
         {
             if (pid == 0) return null;

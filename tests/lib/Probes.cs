@@ -26,6 +26,10 @@ namespace AppVolumeBoosterNs
     //                                      "claimed", listens <ms> long, then "first shown=<n>"
     //                                      (n = how often a later start asked it to show).
     //                                      Not first: writes "second" at once. No window either way.
+    //   target <out>                       what the runtime makes of a build of the booster's
+    //                                      source: "target=" the .NET Framework version it
+    //                                      declares, or "(none)", and "longPaths=" accepted or
+    //                                      refused - one behaviour that follows from it
     //   shot  <out.png> [idle|boosting|waiting|empty|tray|tray-on|options]
     //                                      (tray, tray-on: the panel a right-click on the tray
     //                                      icon opens, with made-up text; options: the gear's
@@ -216,6 +220,17 @@ namespace AppVolumeBoosterNs
                 }
                 if (!object.ReferenceEquals(pic, f)) pic.Close();
                 f.Close();
+                return 0;
+            }
+            if (mode == "target")
+            {
+                // a path over 260 characters, no part of it over 255: refused with the behaviour of .NET Framework 4.0,
+                // which is what a program that declares no target gets, and accepted otherwise
+                string longPaths;
+                try { longPaths = Path.GetFullPath(@"C:\" + new string('a', 150) + @"\" + new string('b', 150)).Length > 300 ? "accepted" : "shortened"; }
+                catch (PathTooLongException) { longPaths = "refused"; }
+                File.WriteAllText(a[1], "target=" + (AppDomain.CurrentDomain.SetupInformation.TargetFrameworkName ?? "(none)") + "\r\n"
+                    + "longPaths=" + longPaths + "\r\n");
                 return 0;
             }
             if (mode == "list")

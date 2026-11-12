@@ -10,7 +10,7 @@ installation. If you never run it, it does nothing.
 
 | File | Purpose |
 |---|---|
-| `VolumeBooster\AppVolumeBooster.exe` | The tool (double-click). Needs nothing installed. |
+| `VolumeBooster\AppVolumeBooster.exe` | The tool (double-click). Needs nothing installed: it runs on the .NET Framework that is part of Windows, and is written for .NET Framework 4.8.1, its last version. |
 | `VolumeBooster\AppVolumeBooster.cs` | Complete source code, one file. |
 | `VolumeBooster\Build-Booster.cmd` | Rebuilds the exe using the C# compiler that ships inside Windows - works even on a freshly reinstalled machine with no tools. It compiles to a temporary file and only then replaces the exe, so a failed rebuild leaves the working binary you already had and exits non-zero instead of reporting success. |
 | `%LocalAppData%\AppVolumeBooster\booster-state.txt` | Appears only while a boost is active (crash-recovery data, see below). Deleted automatically. There is one per Windows user, shared by every copy of the exe, wherever a copy sits - a read-only folder included. Written through a temporary file and an atomic replace, so killing the booster during the write cannot leave it truncated. (Only if that folder cannot be used does the note go next to the exe, and failing that to `%TEMP%`.) |
@@ -102,7 +102,7 @@ this kit manages.
 - **Anti-cheat safe by construction**: nothing is injected into any process - the audio is read through a public OS API, same as OBS. Games cannot tell the difference.
 - **Unsigned exe**: SmartScreen or an antivirus may warn on first run - expected for any home-built exe. The full source sits next to it, and `Build-Booster.cmd` reproduces the exe from that source using only Windows' own compiler.
 - **Hardware care**: 500% is about 14 dB over what the system normally allows. On laptop speakers at full device volume this can sound bad or, on cheap speakers, damage them over time. Prefer boosting quiet content rather than everything. Start low and only go higher if the source is actually quiet. Boosting all audio at a high slider is the most aggressive setting this tool has.
-- Needs Windows' process-loopback capture. Microsoft documents Windows 10 build 20348 as the minimum for it (this page used to say version 2004, build 19041); the booster has only ever been run on Windows 11 build 26100. It runs as a 32-bit or a 64-bit process.
+- Needs Windows' process-loopback capture. Microsoft documents Windows 10 build 20348 as the minimum for it (this page used to say version 2004, build 19041); the booster has only ever been run on Windows 11 build 26100. It runs as a 32-bit or a 64-bit process. It is written for .NET Framework 4.8.1, which is part of Windows 11 since 22H2, and declares that, so Windows gives it current behaviour instead of the .NET Framework 4.0 behaviour that a program declaring nothing gets. Nothing compares the declaration with the installed version; on a Windows that has only 4.8 the exe should start all the same, which was not tried.
 
 ## Command line (for scripts; the window appears when run with no arguments)
 
@@ -214,6 +214,25 @@ brackets); the audio tests again used only the private near-silent test process.
   4%, the repair from it, the real level after a boost of an app found at 4%, and the
   restore on a crash. Measured on the way: the audio service does not re-read a level
   written into the store - the repair has to reach the live session. SelfHeal covers it.
+- Added 2026-11-12: the exe declares the .NET Framework version it is written for, 4.8.1,
+  the last one. Until then it declared none - the in-box compiler does not add one - and
+  Windows ran it with the behaviour of .NET Framework 4.0. Measured with a small program
+  built both ways: 22 of the 29 framework switches looked at change with the declaration,
+  among them legacy path handling, PNG frames in icons and all five accessibility levels of
+  Windows Forms, and a 304-character path is refused without it and accepted with it. The
+  window was pictured off screen in seven states, four times with each build: each state's
+  usual picture is the same to the pixel before and after. (Six of the 56 pictures differ
+  from it in the slider's filled part or a checkbox, with the old build as with the new:
+  both are drawn differently while they have the keyboard focus, which an off-screen window
+  gets or not by chance.) The build test asks a build of the source which target the
+  runtime sees and whether it accepts such a path.
+- Also 2026-11-12: a program whose exe is renamed while it runs - an updater does that to
+  make room for the new version - keeps the name it was started under. The booster read the
+  name of the exe file as it is called now, and so knew such a program under the new file
+  name, not the one `Get-Process` shows and its saved level and automatic boost go by.
+  (`--name` was not affected: it finds its processes the way `Get-Process` does.) Found by
+  ProcessInfo on a machine where one process was in that state; the test now starts such a
+  process itself.
 - The exe in the kit had not been rebuilt since 2026-09-23 while its source was being fixed,
   and no test could notice. The build test now compares the shipped exe with a fresh build.
 
